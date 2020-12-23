@@ -1,1 +1,1 @@
-# jsget
+# linkz
