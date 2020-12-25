@@ -638,6 +638,13 @@ var blockedLibs = []string{
 //Exist desc
 func Exist(str string)bool{	
 	for _, item := range blockedLibs {
+		
+		//first we try directly
+		if(item == str){
+			return true
+		}
+		
+		//if we didn't find it, try with alterations
 		alt:=alterations(item)
 		for _,v:=range alt{
 			if v == str {

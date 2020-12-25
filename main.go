@@ -242,6 +242,7 @@ func getLinks(webPage string, res []byte) []string{
 			if(validate){
 				if(strings.Contains(u, domParse.SLD)){
 					addLink = true
+					//fmt.Printf("link domain ok: %v\n", u)
 				}else{
 					//fmt.Printf("link err: %v\n", u)
 				}
@@ -250,6 +251,8 @@ func getLinks(webPage string, res []byte) []string{
 			//matching name agains our blacklist
 			if(addLink && filter.Exist(files.GetFileNameFromLink(u))){
 				addLink = false
+			}else{
+				//fmt.Printf("link BL OK: %v\n", u)
 			}
 									
 			if(addLink){
