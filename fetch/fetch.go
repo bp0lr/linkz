@@ -29,17 +29,20 @@ type Config struct {
 }
 
 type Client struct {
-	http    *http.Client
-	headers http.Header
-	maxSize int64
-	slots   chan struct{}
-	allowed map[string]bool
+	http          *http.Client
+	headers       http.Header
+	maxSize       int64
+	slots         chan struct{}
+	allowed       map[string]bool
+	customHeaders bool
 }
 
 type Response struct {
-	Body   io.ReadCloser
-	URL    string
-	Status int
+	Body       io.ReadCloser
+	URL        string
+	Status     int
+	Validators Validators
+	Cacheable  bool
 }
 
 type scopeKey struct{}
@@ -66,6 +69,7 @@ func New(conf Config) (*Client, error) {
 	}
 	c := &Client{http: &http.Client{Transport: transport, Timeout: conf.Timeout}, headers: make(http.Header), maxSize: conf.MaxSize, slots: make(chan struct{}, conf.Workers)}
 	c.allowed = allowed
+	c.customHeaders = len(conf.Headers) != 0
 	c.headers.Set("User-Agent", "linkz")
 	for _, header := range conf.Headers {
 		name, value, ok := strings.Cut(header, ":")
@@ -130,6 +134,10 @@ func port(u *url.URL) string {
 }
 
 func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error) {
+	return c.open(ctx, raw, origin, Validators{})
+}
+
+func (c *Client) open(ctx context.Context, raw, origin string, validators Validators) (*Response, error) {
 	u, err := ParseURL(raw)
 	if err != nil {
 		return nil, err
@@ -157,15 +165,27 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 		return nil, err
 	}
 	req.Header = c.requestHeaders(u, scope)
+	conditional := validators.ETag != "" || validators.LastModified != ""
+	if conditional {
+		if !validators.Valid() || !c.CanRevalidate(u.String(), origin) {
+			return nil, errors.New("request is not eligible for conditional reuse")
+		}
+		if validators.ETag != "" {
+			req.Header.Set("If-None-Match", validators.ETag)
+		} else {
+			req.Header.Set("If-Modified-Since", validators.LastModified)
+		}
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	notModified := resp.StatusCode == http.StatusNotModified && conditional && resp.Request.URL.String() == u.String() && (resp.Request.Header.Get("If-None-Match") != "" || resp.Request.Header.Get("If-Modified-Since") != "")
+	if !notModified && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 		resp.Body.Close()
 		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
 	}
-	if resp.ContentLength > c.maxSize {
+	if !notModified && resp.ContentLength > c.maxSize {
 		resp.Body.Close()
 		return nil, ErrTooLarge
 	}
@@ -174,7 +194,7 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 		io.Closer
 	}{&limitedReader{r: resp.Body, remaining: c.maxSize}, resp.Body}
 	handedOff = true
-	return &Response{Body: &leasedBody{ReadCloser: body, release: func() { <-c.slots }}, URL: resp.Request.URL.String(), Status: resp.StatusCode}, nil
+	return &Response{Body: &leasedBody{ReadCloser: body, release: func() { <-c.slots }}, URL: resp.Request.URL.String(), Status: resp.StatusCode, Validators: responseValidators(resp.Header), Cacheable: c.reusable(resp, u.String(), origin)}, nil
 }
 
 // Keep the concurrency slot until the response body is closed, including while

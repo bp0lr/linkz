@@ -35,6 +35,26 @@ func NewStore(folder string) (*Store, error) {
 
 func (s *Store) Close() error { return s.root.Close() }
 
+// Verify checks a cached file inside the output root without trusting its name,
+// size or digest from the manifest. Missing or changed files must be downloaded.
+func (s *Store) Verify(saved Saved, maxSize int64) bool {
+	if saved.Size < 0 || saved.Size > maxSize || !filepath.IsLocal(filepath.FromSlash(saved.File)) {
+		return false
+	}
+	f, err := s.root.Open(filepath.FromSlash(saved.File))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != saved.Size {
+		return false
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(f, maxSize+1))
+	return err == nil && n == saved.Size && fmt.Sprintf("%x", hash.Sum(nil)) == saved.SHA256
+}
+
 // Save uses the full URL as identity, including query parameters. An inline index
 // of zero denotes an external resource. Inline identities also include content.
 func (s *Store) Save(raw string, inlineIndex int, content []byte) (Saved, error) {

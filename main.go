@@ -17,6 +17,7 @@ import (
 type options struct {
 	url, output, folder, proxy           string
 	manifest, inputHTML, baseURL         string
+	cacheFrom                            string
 	headers                              []string
 	allowedOrigins                       []string
 	workers, timeout                     int
@@ -59,6 +60,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	flags.MarkDeprecated("use-pb", "use --stats")
 	flags.BoolVar(&showVersion, "version", false, "Show build version")
 	flags.StringVar(&o.manifest, "manifest", "", "Write a JSONL inventory (replace existing contents)")
+	flags.StringVar(&o.cacheFrom, "cache-from", "", "Revalidate saved scripts using a previous manifest and --folder")
 	flags.StringVar(&o.inputHTML, "input-html", "", "Read local HTML without HTTP requests; use - for stdin")
 	flags.StringVar(&o.baseURL, "base-url", "", "Absolute page URL for --input-html")
 	flags.BoolVarP(&help, "help", "h", false, "Show help")
@@ -105,6 +107,17 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if err := validatePaths(o); err != nil {
 		return fail(diagnostics, err, 2)
 	}
+	if o.cacheFrom != "" && (o.folder == "" || o.inputHTML != "") {
+		return fail(diagnostics, errors.New("cache-from requires --folder and HTTP input"), 2)
+	}
+	var previous map[string]artifact
+	if o.cacheFrom != "" {
+		inv, err := loadInventory(o.cacheFrom)
+		if err != nil {
+			return fail(diagnostics, err, 1)
+		}
+		previous = cacheIndex(inv)
+	}
 	if o.url != "" {
 		if _, err := web.ParseURL(o.url); err != nil {
 			return fail(diagnostics, err, 2)
@@ -143,7 +156,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		defer resultFile.Close()
 		output = io.MultiWriter(output, resultFile)
 	}
-	app := collector{options: o, client: client, store: store}
+	app := collector{options: o, client: client, store: store, previous: previous}
 	err = app.collect(ctx, input, output, diagnostics, manifest)
 	if resultFile != nil {
 		err = errors.Join(err, resultFile.Close())

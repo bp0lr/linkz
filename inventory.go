@@ -45,6 +45,9 @@ func buildVersion() string {
 // Reject conflicting inputs and outputs before opening any output with truncate.
 func validatePaths(o options) error {
 	paths := []string{o.output, o.manifest}
+	if o.cacheFrom != "" {
+		paths = append(paths, o.cacheFrom)
+	}
 	if o.inputHTML != "" && o.inputHTML != "-" {
 		paths = append(paths, o.inputHTML)
 	}
@@ -68,7 +71,7 @@ func validatePaths(o options) error {
 			infoA, errA := os.Stat(a)
 			infoB, errB := os.Stat(b)
 			if same || errA == nil && errB == nil && os.SameFile(infoA, infoB) {
-				return fmt.Errorf("input-html, output and manifest must use different files")
+				return fmt.Errorf("input and output files must use different paths")
 			}
 		}
 	}
@@ -82,6 +85,8 @@ type reporter struct {
 	urls, files         map[string]bool
 	pages, errors       int
 	bytes               int64
+	reused              int
+	downloadedBytes     int64
 	start               time.Time
 }
 
@@ -118,6 +123,11 @@ func (r *reporter) write(page pageResult) error {
 			if !r.files[a.File] {
 				r.files[a.File] = true
 				r.bytes += a.Size
+				if a.Reused {
+					r.reused++
+				} else if a.Kind == "external" {
+					r.downloadedBytes += a.Size
+				}
 			}
 		}
 		if a.InlineIndex == 0 && !r.urls[a.URL] {
@@ -145,6 +155,6 @@ func (r *reporter) record(a artifact) error {
 
 func (r *reporter) summarize() {
 	if r.options.stats {
-		fmt.Fprintf(r.diagnostics, "pages=%d urls=%d files=%d bytes=%d errors=%d elapsed=%s\n", r.pages, len(r.urls), len(r.files), r.bytes, r.errors, time.Since(r.start).Round(time.Millisecond))
+		fmt.Fprintf(r.diagnostics, "pages=%d urls=%d files=%d bytes=%d errors=%d reused=%d downloaded_bytes=%d elapsed=%s\n", r.pages, len(r.urls), len(r.files), r.bytes, r.errors, r.reused, r.downloadedBytes, time.Since(r.start).Round(time.Millisecond))
 	}
 }

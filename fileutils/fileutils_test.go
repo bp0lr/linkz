@@ -91,3 +91,27 @@ func TestStableDistinctPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyCachedFileWithinRoot(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(filepath.Join(dir, "scripts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	saved, err := s.Save("https://example.test/app.js", 0, []byte("content"))
+	if err != nil || !s.Verify(saved, 7) || s.Verify(saved, 6) {
+		t.Fatalf("saved=%+v err=%v", saved, err)
+	}
+	outside := filepath.Join(dir, "outside.js")
+	if err := os.WriteFile(outside, []byte("content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"../outside.js", outside, "missing.js", "."} {
+		candidate := saved
+		candidate.File = name
+		if s.Verify(candidate, 7) {
+			t.Errorf("accepted invalid cached file %q", name)
+		}
+	}
+}

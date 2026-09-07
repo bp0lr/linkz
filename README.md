@@ -100,6 +100,22 @@ Manifest version 2 includes a completion record for every processed page, includ
 
 Compare runs with matching input pages, origin allowlists, library filters, and inline settings. Differences describe the inventories, not proof of changes on the live website. Each input must be a regular JSONL file of at most 256 MiB, with records no larger than 8 MiB.
 
+## Revalidate saved scripts
+
+Save an initial inventory, then reuse its validators on a later run with the same storage folder:
+
+```sh
+linkz -u https://example.com -f output --manifest before.jsonl
+linkz -u https://example.com -f output --cache-from before.jsonl --manifest after.jsonl --stats
+linkz diff before.jsonl after.jsonl
+```
+
+`--cache-from` reads the previous manifest; no separate cache database is needed. Eligible scripts use `If-None-Match` with an ETag, or `If-Modified-Since` with Last-Modified when no ETag is available. A `304` response reuses the local file after checking its size and SHA-256. Missing or modified local files trigger a full download. A `200` response replaces the saved content and updates its metadata. Request failures remain errors; stale files are not reported as successful downloads.
+
+HTML pages are always fetched. Revalidation requires HTTP mode, `--folder`, a direct resource response and a valid validator. Requests carrying custom `-H` headers, responses with `Cache-Control: no-store`, and `Vary` fields other than `Accept-Encoding` or `User-Agent` are excluded. Allowed CDNs can still be revalidated because they receive only default headers. Redirected responses and older records without cache metadata use full downloads. Every eligible run contacts the server; Linkz does not implement freshness-based cache serving.
+
+Write the new inventory to a different file. Keep matching input pages and options when comparing snapshots. External files are replaced on content changes, so retain separate folders if you also need historical script bodies.
+
 ## Output and inventory
 
 Stdout contains unique external script URLs. `-o` writes the same list to a file. Logs and optional statistics go to stderr. Output order may vary with concurrent workers.
@@ -119,6 +135,9 @@ Stdout contains unique external script URLs. `-o` writes the same list to a file
 | `file` | Saved path relative to `--folder`, using forward slashes. |
 | `size_bytes`, `sha256` | Byte count and SHA-256 of saved content. Size is `0` for unsaved records; no content hash is emitted for them. |
 | `inline_index` | One-based script element position for inline code. |
+| `etag`, `last_modified` | Valid HTTP validators supplied by the resource response, when available. |
+| `cacheable` | Whether the request and response satisfy Linkz's revalidation policy. Reuse also requires a valid validator and verified local file. |
+| `reused` | `true` when a `304` response allowed reuse of the verified local file. |
 | `error` | Failure description, when present. |
 
 Files are stored under `<folder>/host_<safe-host>/`:
@@ -129,9 +148,9 @@ Files are stored under `<folder>/host_<safe-host>/`:
 - Downloads stream into temporary files within the selected output root. A failed read or write leaves any previous complete file in place and removes the temporary file.
 - A successful rerun replaces an external file with the same URL identity. Existing unrelated files are retained.
 
-Both `-o` and `--manifest` replace previous contents. Input HTML, URL output, and manifest must refer to different files. These files are progressive outputs, so a failed or interrupted run can leave partial results. Completed script files remain available; a page interrupted before reporting may have saved files without manifest records.
+Both `-o` and `--manifest` replace previous contents. Input HTML, URL output, manifest, and `--cache-from` must refer to different files. These files are progressive outputs, so a failed or interrupted run can leave partial results. Completed script files remain available; a page interrupted before reporting may have saved files without manifest records.
 
-`--stats` reports completed page results, unique external URLs, unique saved files, saved bytes, failed records, and elapsed time. Saved file totals include inline scripts. Shared downloads count once in file and byte totals; an error referenced by multiple pages counts once per failed record.
+`--stats` reports completed page results, unique external URLs, unique saved files, saved bytes, failed records, reused files, downloaded bytes, and elapsed time. Saved file and byte totals include inline scripts and reused files. `downloaded_bytes` counts successfully saved external response body bytes, excluding HTML, inline scripts, reused content, and transfer overhead. Shared downloads count once in file and byte totals; an error referenced by multiple pages counts once per failed record.
 
 ## Options
 
@@ -143,6 +162,7 @@ Both `-o` and `--manifest` replace previous contents. Input HTML, URL output, an
 | `-s`, `--save-inline` | `false` | Save inline JavaScript. Requires `-f`. |
 | `-d`, `--download` | `false` | Explicitly request downloads. Requires `-f`, which already enables them in HTTP mode. |
 | `--manifest` | None | Replace this file with a JSONL inventory. |
+| `--cache-from` | None | Revalidate saved scripts from this prior manifest. Requires `-f` and HTTP input. |
 | `--include-libs` | `false` | Include filenames from the bundled library exclusion list. |
 | `--input-html` | None | Read local HTML; `-` reads HTML from stdin. Makes no HTTP requests. |
 | `--base-url` | None | Original page URL for local HTML input. Required with `--input-html`. |
@@ -163,11 +183,11 @@ The legacy `--use-pb` flag is a deprecated alias for `--stats`; there is no anim
 ## Scope and limitations
 
 - Resources and redirects must match the input page origin or an explicit `--allow-origin` value, including scheme and effective port. There is no implicit trust of sibling subdomains or all CDNs.
-- TLS certificates are verified. Non-2xx responses, oversized responses, and file errors are reported. Failed external downloads remain in the URL list and have error records in the manifest.
+- TLS certificates are verified. Non-2xx responses other than eligible conditional `304` responses, oversized responses, and file errors are reported. Failed external downloads remain in the URL list and have error records in the manifest.
 - HTML extraction supports script elements, modules, and the first `<base href>`. JSON data blocks are not saved as inline JavaScript.
 - Quoted `.js` and `.mjs` references are also collected as a best-effort fallback. This is not a JavaScript parser and can include unused references.
 - The bundled library filter matches filenames and selected minified variants, case-insensitively. It does not detect library versions or inspect their contents.
-- URLs are deduplicated per run, including fragment-only differences. Download successes and failures are cached for the run. There are no automatic retries or persistent cache.
+- URLs are deduplicated per run, including fragment-only differences. Download successes and failures are cached for the run. Cross-run revalidation is opt-in with `--cache-from`; there are no automatic retries after request failures.
 - HTTP connections are reused, downloads stream to disk through a bounded worker queue, and exclusions are precalculated. A single page can download multiple scripts concurrently. HTML buffers are bounded by `--max-size` per page worker; bookkeeping grows with unique URLs.
 - Linkz does not recursively crawl pages, execute JavaScript, follow module imports, deduplicate by content, or schedule comparisons automatically.
 

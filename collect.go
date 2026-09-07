@@ -20,6 +20,7 @@ type collector struct {
 	downloadMu   sync.Mutex
 	downloads    map[string]*downloadEntry
 	downloadJobs chan downloadTask
+	previous     map[string]artifact
 }
 
 type downloadTask struct {
@@ -47,6 +48,10 @@ type artifact struct {
 	SHA256        string `json:"sha256,omitempty"`
 	Error         string `json:"error,omitempty"`
 	InlineIndex   int    `json:"inline_index,omitempty"`
+	ETag          string `json:"etag,omitempty"`
+	LastModified  string `json:"last_modified,omitempty"`
+	Cacheable     bool   `json:"cacheable,omitempty"`
+	Reused        bool   `json:"reused,omitempty"`
 }
 
 type pageResult struct {
@@ -274,16 +279,49 @@ func (c *collector) scheduleDownload(ctx context.Context, link, origin string) *
 
 func (c *collector) fetchResource(ctx context.Context, task downloadTask) {
 	entry := task.entry
-	resp, err := c.client.Open(ctx, task.link, task.origin)
-	if err == nil {
-		entry.artifact.FinalURL, entry.artifact.HTTPStatus = resp.URL, resp.Status
-		var saved files.Saved
-		saved, err = c.store.SaveResource(task.link, task.origin, resp.Body)
-		entry.artifact.File, entry.artifact.Size, entry.artifact.SHA256 = saved.File, saved.Size, saved.SHA256
-		resp.Body.Close()
+	defer close(entry.ready)
+	if previous, exists := c.previous[task.origin+"\x00"+task.link]; exists && c.client.CanRevalidate(task.link, task.origin) && c.store.Verify(savedArtifact(previous), c.options.maxSize) {
+		resp, err := c.client.OpenConditional(ctx, task.link, task.origin, web.Validators{ETag: previous.ETag, LastModified: previous.LastModified})
+		if err != nil {
+			entry.artifact.Error = err.Error()
+			return
+		}
+		if resp.Status == 304 {
+			resp.Body.Close()
+			if c.store.Verify(savedArtifact(previous), c.options.maxSize) {
+				entry.artifact.File, entry.artifact.Size, entry.artifact.SHA256 = previous.File, previous.Size, previous.SHA256
+				entry.artifact.FinalURL, entry.artifact.HTTPStatus, entry.artifact.Reused = resp.URL, resp.Status, true
+				entry.artifact.Cacheable = resp.Cacheable
+				entry.artifact.ETag, entry.artifact.LastModified = previous.ETag, previous.LastModified
+				if resp.Validators.ETag != "" {
+					entry.artifact.ETag = resp.Validators.ETag
+				}
+				if resp.Validators.LastModified != "" {
+					entry.artifact.LastModified = resp.Validators.LastModified
+				}
+				return
+			}
+		} else {
+			c.saveResponse(task, resp)
+			return
+		}
 	}
+	resp, err := c.client.Open(ctx, task.link, task.origin)
 	if err != nil {
 		entry.artifact.Error = err.Error()
+		return
 	}
-	close(entry.ready)
+	c.saveResponse(task, resp)
+}
+
+func (c *collector) saveResponse(task downloadTask, resp *web.Response) {
+	defer resp.Body.Close()
+	a := &task.entry.artifact
+	a.FinalURL, a.HTTPStatus = resp.URL, resp.Status
+	a.ETag, a.LastModified, a.Cacheable = resp.Validators.ETag, resp.Validators.LastModified, resp.Cacheable
+	saved, err := c.store.SaveResource(task.link, task.origin, resp.Body)
+	a.File, a.Size, a.SHA256 = saved.File, saved.Size, saved.SHA256
+	if err != nil {
+		a.Error = err.Error()
+	}
 }
