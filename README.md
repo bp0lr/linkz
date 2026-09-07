@@ -118,7 +118,7 @@ Both `-o` and `--manifest` replace previous contents. Input HTML, URL output, an
 | `--input-html` | None | Read local HTML; `-` reads HTML from stdin. Makes no HTTP requests. |
 | `--base-url` | None | Original page URL for local HTML input. Required with `--input-html`. |
 | `--stats` | `false` | Print final totals to stderr. |
-| `-w`, `--workers` | `25` | Concurrent page workers, from 1 to 150. A worker downloads a page's resources sequentially. |
+| `-w`, `--workers` | `25` | Maximum concurrent HTTP requests, from 1 to 150, shared across page and script workers and all hosts. |
 | `--timeout` | `5` | Total HTTP request timeout in seconds, from 1 to 86400. |
 | `--max-size` | `16777216` | Maximum bytes per HTTP response or local HTML input, from 1 byte to 1 GiB. |
 | `--follow-redirect` | `false` | Follow redirects within the page origin, up to 10 hops. |
@@ -138,7 +138,7 @@ The legacy `--use-pb` flag is a deprecated alias for `--stats`; there is no anim
 - Quoted `.js` and `.mjs` references are also collected as a best-effort fallback. This is not a JavaScript parser and can include unused references.
 - The bundled library filter matches filenames and selected minified variants, case-insensitively. It does not detect library versions or inspect their contents.
 - URLs are deduplicated per run, including fragment-only differences. Download successes and failures are cached for the run. There are no automatic retries or persistent cache.
-- HTTP connections are reused, downloads stream to disk, and exclusions are precalculated. HTML buffers are bounded by `--max-size` per active worker; bookkeeping grows with unique URLs.
+- HTTP connections are reused, downloads stream to disk through a bounded worker queue, and exclusions are precalculated. A single page can download multiple scripts concurrently. HTML buffers are bounded by `--max-size` per page worker; bookkeeping grows with unique URLs.
 - Linkz does not recursively crawl pages, execute JavaScript, follow module imports, deduplicate by content, or compare successive inventories automatically.
 
 Exit codes: `0` for success, help, or version; `1` for collection or output failures; `2` for invalid arguments. Ctrl+C cancels pending HTTP work.
@@ -151,7 +151,16 @@ go vet ./...
 go mod tidy -diff
 ```
 
-Tests use local HTTP servers and HTML fixtures. CI is configured for Windows and Linux with Go 1.26.8 and 1.27.1, including the race detector on Linux. See [PLAN.md](PLAN.md) for the commit breakdown and [PERFORMANCE.md](PERFORMANCE.md) for reproducible local measurements.
+Tests use local HTTP servers and HTML fixtures. CI is configured for Windows and Linux with Go 1.26.8 and 1.27.1, including the race detector on Linux.
+
+To reproduce the focused performance checks:
+
+```sh
+go test ./static -run '^$' -bench BenchmarkExist -benchmem
+go test . -run '^$' -bench BenchmarkExtract -benchmem
+```
+
+On Windows amd64 with Go 1.26.8 and a Ryzen 9 3900X, the median lookup time for `app.js` changed from 241223 ns/op and 5000 allocations to 15.34 ns/op and zero allocations across three 200 ms runs. This measures the library filter only; map initialization is outside the measurement, and it is not an end-to-end download speed claim.
 
 For release builds, set the version explicitly:
 

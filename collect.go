@@ -14,11 +14,17 @@ import (
 )
 
 type collector struct {
-	options    options
-	client     *web.Client
-	store      *files.Store
-	downloadMu sync.Mutex
-	downloads  map[string]*downloadEntry
+	options      options
+	client       *web.Client
+	store        *files.Store
+	downloadMu   sync.Mutex
+	downloads    map[string]*downloadEntry
+	downloadJobs chan downloadTask
+}
+
+type downloadTask struct {
+	link, origin string
+	entry        *downloadEntry
 }
 
 type downloadEntry struct {
@@ -54,6 +60,19 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 	jobs := make(chan string)
 	results := make(chan pageResult)
 	inputErr := make(chan error, 1)
+	var downloadWorkers sync.WaitGroup
+	if c.options.download {
+		c.downloadJobs = make(chan downloadTask, c.options.workers)
+		for i := 0; i < c.options.workers; i++ {
+			downloadWorkers.Add(1)
+			go func() {
+				defer downloadWorkers.Done()
+				for task := range c.downloadJobs {
+					c.fetchResource(ctx, task)
+				}
+			}()
+		}
+	}
 	go func() {
 		defer close(jobs)
 		if c.options.inputHTML != "" {
@@ -115,7 +134,14 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 			}
 		}()
 	}
-	go func() { workers.Wait(); close(results) }()
+	go func() {
+		workers.Wait()
+		if c.downloadJobs != nil {
+			close(c.downloadJobs)
+			downloadWorkers.Wait()
+		}
+		close(results)
+	}()
 	report := newReporter(c.options, output, diagnostics, manifest)
 	defer report.summarize()
 	var writeErr error
@@ -182,10 +208,21 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 		result.err = err
 		return result
 	}
-	for _, link := range scripts.links {
+	pending := make([]*downloadEntry, len(scripts.links))
+	if c.options.download {
+		for i, link := range scripts.links {
+			pending[i] = c.scheduleDownload(ctx, link, final)
+		}
+	}
+	for i, link := range scripts.links {
 		a := artifact{URL: link}
 		if c.options.download {
-			a = c.download(ctx, link, final)
+			select {
+			case <-pending[i].ready:
+				a = pending[i].artifact
+			case <-ctx.Done():
+				a.Error = ctx.Err().Error()
+			}
 		}
 		result.artifacts = append(result.artifacts, a)
 	}
@@ -206,28 +243,34 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 
 // Cache both successes and failures for this run. Concurrent pages referencing
 // the same URL wait for one download while retaining their own provenance.
-func (c *collector) download(ctx context.Context, link, origin string) artifact {
+func (c *collector) scheduleDownload(ctx context.Context, link, origin string) *downloadEntry {
 	c.downloadMu.Lock()
 	if c.downloads == nil {
 		c.downloads = make(map[string]*downloadEntry)
 	}
 	if entry, exists := c.downloads[link]; exists {
 		c.downloadMu.Unlock()
-		select {
-		case <-entry.ready:
-			return entry.artifact
-		case <-ctx.Done():
-			return artifact{URL: link, Error: ctx.Err().Error()}
-		}
+		return entry
 	}
 	entry := &downloadEntry{ready: make(chan struct{}), artifact: artifact{URL: link}}
 	c.downloads[link] = entry
 	c.downloadMu.Unlock()
-	resp, err := c.client.Open(ctx, link, origin)
+	select {
+	case c.downloadJobs <- downloadTask{link, origin, entry}:
+	case <-ctx.Done():
+		entry.artifact.Error = ctx.Err().Error()
+		close(entry.ready)
+	}
+	return entry
+}
+
+func (c *collector) fetchResource(ctx context.Context, task downloadTask) {
+	entry := task.entry
+	resp, err := c.client.Open(ctx, task.link, task.origin)
 	if err == nil {
 		entry.artifact.FinalURL, entry.artifact.HTTPStatus = resp.URL, resp.Status
 		var saved files.Saved
-		saved, err = c.store.SaveReader(link, 0, resp.Body)
+		saved, err = c.store.SaveReader(task.link, 0, resp.Body)
 		entry.artifact.File, entry.artifact.Size, entry.artifact.SHA256 = saved.File, saved.Size, saved.SHA256
 		resp.Body.Close()
 	}
@@ -235,5 +278,4 @@ func (c *collector) download(ctx context.Context, link, origin string) artifact 
 		entry.artifact.Error = err.Error()
 	}
 	close(entry.ready)
-	return entry.artifact
 }

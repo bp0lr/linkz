@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
@@ -29,6 +30,7 @@ type Client struct {
 	http    *http.Client
 	headers http.Header
 	maxSize int64
+	slots   chan struct{}
 }
 
 type Response struct {
@@ -55,7 +57,7 @@ func New(conf Config) (*Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(proxy)
 	}
-	c := &Client{http: &http.Client{Transport: transport, Timeout: conf.Timeout}, headers: make(http.Header), maxSize: conf.MaxSize}
+	c := &Client{http: &http.Client{Transport: transport, Timeout: conf.Timeout}, headers: make(http.Header), maxSize: conf.MaxSize, slots: make(chan struct{}, conf.Workers)}
 	c.headers.Set("User-Agent", "linkz")
 	for _, header := range conf.Headers {
 		name, value, ok := strings.Cut(header, ":")
@@ -124,6 +126,17 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 	if !SameOrigin(scope, u) {
 		return nil, errors.New("resource leaves page origin")
 	}
+	select {
+	case c.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			<-c.slots
+		}
+	}()
 	req, err := http.NewRequestWithContext(context.WithValue(ctx, scopeKey{}, scope), http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
@@ -141,10 +154,26 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 		resp.Body.Close()
 		return nil, ErrTooLarge
 	}
-	return &Response{Body: struct {
+	body := struct {
 		io.Reader
 		io.Closer
-	}{&limitedReader{r: resp.Body, remaining: c.maxSize}, resp.Body}, URL: resp.Request.URL.String(), Status: resp.StatusCode}, nil
+	}{&limitedReader{r: resp.Body, remaining: c.maxSize}, resp.Body}
+	handedOff = true
+	return &Response{Body: &leasedBody{ReadCloser: body, release: func() { <-c.slots }}, URL: resp.Request.URL.String(), Status: resp.StatusCode}, nil
+}
+
+// Keep the concurrency slot until the response body is closed, including while
+// the caller streams it to disk. All hosts and both work queues share this cap.
+type leasedBody struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (b *leasedBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.release)
+	return err
 }
 
 func (c *Client) Get(ctx context.Context, raw, origin string) ([]byte, string, error) {

@@ -42,7 +42,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	flags.BoolVarP(&o.download, "download", "d", false, "Download scripts; requires --folder")
 	flags.BoolVarP(&o.inline, "save-inline", "s", false, "Save inline JavaScript; requires --folder")
 	flags.BoolVarP(&o.verbose, "verbose", "v", false, "Print page diagnostics to stderr")
-	flags.IntVarP(&o.workers, "workers", "w", 25, "Concurrent page workers (1-150)")
+	flags.IntVarP(&o.workers, "workers", "w", 25, "Maximum concurrent HTTP requests (1-150)")
 	flags.IntVar(&o.timeout, "timeout", 5, "HTTP request timeout in seconds")
 	flags.Int64Var(&o.maxSize, "max-size", 16<<20, "Maximum bytes per response (1-1073741824)")
 	flags.BoolVar(&o.redirects, "follow-redirect", false, "Follow redirects within the page origin")

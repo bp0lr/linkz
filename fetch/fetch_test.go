@@ -7,10 +7,62 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestGlobalRequestLimitAndCanceledWaiter(t *testing.T) {
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			fmt.Fprint(w, "ok")
+		case <-r.Context().Done():
+		}
+	})
+	a, b := httptest.NewServer(handler), httptest.NewServer(handler)
+	defer a.Close()
+	defer b.Close()
+	defer unblock()
+	c := testClient(t, 1024, false)
+	done := make(chan error, 2)
+	for _, target := range []string{a.URL, b.URL} {
+		go func() { _, _, err := c.Get(context.Background(), target, target); done <- err }()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("requests did not start")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, _, err := c.Get(ctx, a.URL, a.URL)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting request: %v", err)
+	}
+	select {
+	case <-started:
+		t.Fatal("exceeded global request limit")
+	default:
+	}
+	unblock()
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := c.Get(context.Background(), a.URL, a.URL); err != nil {
+		t.Fatalf("slot was not released: %v", err)
+	}
+}
 
 func TestConnectionReuse(t *testing.T) {
 	var connections atomic.Int64

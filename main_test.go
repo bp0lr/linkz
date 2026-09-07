@@ -9,9 +9,58 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestSinglePageDownloadsConcurrently(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			fmt.Fprint(w, `<script src="a.js"></script><script src="b.js"></script><script src="c.js"></script><script src="d.js"></script>`)
+			return
+		}
+		started <- r.URL.Path
+		select {
+		case <-release:
+			fmt.Fprint(w, "app")
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer unblock()
+	dir := t.TempDir()
+	type result struct {
+		code      int
+		out, diag string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, out, diag := cli(t, "", "-u", server.URL, "-f", dir, "-w", "2")
+		done <- result{code, out, diag}
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("script downloads were serialized")
+		}
+	}
+	unblock()
+	select {
+	case r := <-done:
+		if r.code != 0 || len(strings.Fields(r.out)) != 4 {
+			t.Fatalf("%+v", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("collection did not finish")
+	}
+}
 
 func TestDeduplicatePagesAndSharedDownloads(t *testing.T) {
 	var pages, scripts atomic.Int64
