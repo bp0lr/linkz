@@ -1,331 +1,119 @@
-//
-// @bp0lr - 30/11/2020
-//
-
 package main
 
 import (
-	"path"
-	"os"
+	"context"
+	"errors"
 	"fmt"
-	"sync"
-	"bufio"
-	"regexp"
-	"strings"
-	"net/url"
-	
-	files	"github.com/bp0lr/linkz/fileutils"
-	web		"github.com/bp0lr/linkz/fetch"
-	filter	"github.com/bp0lr/linkz/static"
+	"io"
+	"os"
+	"os/signal"
+	"time"
 
-	flag 	"github.com/spf13/pflag"
-	bs 		"github.com/pysrc/bs"
-	random 	"github.com/thanhpk/randstr"
-	tld 	"github.com/weppos/publicsuffix-go/publicsuffix"
+	web "github.com/bp0lr/linkz/fetch"
+	files "github.com/bp0lr/linkz/fileutils"
+	"github.com/spf13/pflag"
 )
 
-var (
-		workersArg				int
-		timeOutArg				int
-		urlArg					string
-		outputFileArg			string
-		outputFolderArg			string
-		proxyArg				string
-		headerArg         		[]string
-		verboseArg				bool
-		pbArg					bool
-		followRedirectArg		bool
-		saveInlineArg			bool
-		downloadArg				bool
-)
+type options struct {
+	url, output, folder, proxy           string
+	headers                              []string
+	workers, timeout                     int
+	maxSize                              int64
+	download, inline, redirects, verbose bool
+}
 
 func main() {
-
-	flag.IntVarP(&workersArg, "workers", "w", 25, "Number of workers")
-	flag.StringVarP(&urlArg, "url", "u", "", "Target URL")
-	flag.BoolVarP(&verboseArg, "verbose", "v", false, "Add verboicity to the process")
-	flag.BoolVarP(&saveInlineArg, "save-inline", "s", false, "Save Inline javascript blocks")
-	flag.BoolVarP(&downloadArg, "download", "d", false, "download files")
-	flag.StringVarP(&outputFileArg, "output", "o", "", "Output file to save the results to")
-	flag.StringVarP(&outputFolderArg, "folder", "f", "", "Output files to this folder")
-	flag.IntVar(&timeOutArg, "timeout", 5, "Request timeOut in second")
-	flag.BoolVar(&pbArg, "use-pb", false, "use a progress bar")
-	flag.StringVarP(&proxyArg, "proxy", "p", "", "Use HTTP proxy")
-	flag.StringArrayVarP(&headerArg, "header", "H", nil, "Add HTTP headers")
-	flag.BoolVar(&followRedirectArg, "follow-redirect", false, "Follow redirects (Default: false)")
-
-	flag.Parse()
-
-	if (len(outputFolderArg) > 0){
-		downloadArg = true
-	}
-
-	//concurrency
-	workers := 25
-	if workersArg > 0  &&  workersArg < 151 {
-		workers = workersArg
-	}else{
-		fmt.Printf("[+] Workers amount should be between 1 and 150.\n")
-		fmt.Printf("[+] The number of workers was set to 25.\n")		
-	}
-	
-	if(verboseArg){
-		fmt.Printf("[+] Workers: %v\n", workers)
-	}
-
-	var outputFile *os.File
-	var err0 error
-	if outputFileArg != "" {
-		outputFile, err0 = os.OpenFile(outputFileArg, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
-		if err0 != nil {
-			fmt.Printf("cannot write %s: %s", outputFileArg, err0.Error())
-			return
-		}
-		
-		defer outputFile.Close()
-	}
-
-	var jobs []string
-
-	if len(urlArg) < 1 {
-		sc := bufio.NewScanner(os.Stdin)
-		for sc.Scan() {
-			jobs = append(jobs, sc.Text())
-		}
-	} else {
-		jobs = append(jobs, urlArg)
-	}
-
-	///////////////////////////////
-	// Code processing
-	///////////////////////////////
-
-	conf:=web.HTTPConf{Timeout: timeOutArg, Proxy: proxyArg, Redirect: followRedirectArg, Headers: headerArg}
-
-	var linksToDownload []string
-
-	targetDomains := make(chan string)
-	var wg sync.WaitGroup
-	var mu = &sync.Mutex{}
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			for task := range targetDomains {				
-				source, err:=web.Get(task, headerArg, conf)
-				if(err == nil){
-					links:=getLinks(task, source)
-					if(len(links) > 0){
-						mu.Lock()
-						linksToDownload=append(linksToDownload, links...)
-						mu.Unlock()
-					}
-
-					var output string
-					p, err := url.Parse(task)
-					if(err == nil){
-						output = path.Join(outputFolderArg, p.Host)
-					}else{
-						output = outputFolderArg
-					}
-
-					if(saveInlineArg){
-						if(len(outputFolderArg) > 0){
-							saveInline(source, output)
-						} else {
-							fmt.Printf("Please specify the download folder using -f")
-							os.Exit(0)
-						}						
-					}
-				}else{
-					if(verboseArg){
-						fmt.Printf("[-] %v => %v\n", task, err)
-					}
-				}				
-			}
-			wg.Done()
-		}()
-	}
-		
-	for _, line := range jobs {
-		targetDomains <- line
-	}
-	
-	close(targetDomains)	
-	wg.Wait()	
-
-	if(downloadArg && len(outputFolderArg) > 0){
-		if(len(linksToDownload) > 0){
-			downloadList(workers, conf, linksToDownload)
-		}else{
-			if(verboseArg){
-				fmt.Printf("Nothing to download. The links list is empty")
-				os.Exit(0)	
-			}
-		}
-	} else {
-		fmt.Printf("Please specify the download folder using -f")
-		os.Exit(0)
-	}		
-
-	for _,v:=range linksToDownload{
-		fmt.Printf("%v\n", v)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func saveInline(source []byte, output string){
-	soup := bs.Init(string(source))
-	for _, j := range soup.SelByTag("script") {
-		if(len(j.Value) > 0){
-			fullPath:= path.Join(output, "inline_"+random.String(16) + ".txt")
-			err:=files.CreateAndSaveToFile(fullPath, []byte(j.Value))
-			if(err != nil){
-				if(verboseArg){
-					fmt.Printf("I can't save the inline script: %v\n", err)
-				}
-			}
+func run(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer) int {
+	var o options
+	var help, progress bool
+	flags := pflag.NewFlagSet("linkz", pflag.ContinueOnError)
+	flags.SetOutput(diagnostics)
+	flags.StringVarP(&o.url, "url", "u", "", "Page URL; otherwise read URLs from stdin")
+	flags.StringVarP(&o.folder, "folder", "f", "", "Folder for downloaded scripts")
+	flags.StringVarP(&o.output, "output", "o", "", "Write URLs to this file (replace existing contents)")
+	flags.BoolVarP(&o.download, "download", "d", false, "Download scripts; requires --folder")
+	flags.BoolVarP(&o.inline, "save-inline", "s", false, "Save inline JavaScript; requires --folder")
+	flags.BoolVarP(&o.verbose, "verbose", "v", false, "Print page diagnostics to stderr")
+	flags.IntVarP(&o.workers, "workers", "w", 25, "Concurrent page workers (1-150)")
+	flags.IntVar(&o.timeout, "timeout", 5, "HTTP request timeout in seconds")
+	flags.Int64Var(&o.maxSize, "max-size", 16<<20, "Maximum bytes per response (1-1073741824)")
+	flags.BoolVar(&o.redirects, "follow-redirect", false, "Follow redirects within the page origin")
+	flags.StringVarP(&o.proxy, "proxy", "p", "", "HTTP or HTTPS proxy URL")
+	flags.StringArrayVarP(&o.headers, "header", "H", nil, "HTTP header in Name: value format (repeatable)")
+	flags.BoolVar(&progress, "use-pb", false, "Reserved legacy option")
+	flags.BoolVarP(&help, "help", "h", false, "Show help")
+	if err := flags.Parse(args); err != nil {
+		return fail(diagnostics, err, 2)
+	}
+	if help {
+		fmt.Fprintln(output, "Linkz collects JavaScript from explicitly supplied pages.\n\nUsage: linkz [options]")
+		flags.SetOutput(output)
+		flags.PrintDefaults()
+		return 0
+	}
+	if flags.NArg() != 0 {
+		return fail(diagnostics, errors.New("use --url or stdin for page URLs"), 2)
+	}
+	if o.workers < 1 || o.workers > 150 {
+		return fail(diagnostics, errors.New("workers must be between 1 and 150"), 2)
+	}
+	if o.timeout < 1 || o.timeout > 86400 {
+		return fail(diagnostics, errors.New("timeout must be between 1 and 86400 seconds"), 2)
+	}
+	if o.maxSize < 1 || o.maxSize > 1<<30 {
+		return fail(diagnostics, errors.New("max-size must be between 1 and 1073741824 bytes"), 2)
+	}
+	if (o.download || o.inline) && o.folder == "" {
+		return fail(diagnostics, errors.New("download and save-inline require --folder"), 2)
+	}
+	if progress {
+		return fail(diagnostics, errors.New("use-pb is not implemented"), 2)
+	}
+	if o.url != "" {
+		if _, err := web.ParseURL(o.url); err != nil {
+			return fail(diagnostics, err, 2)
 		}
 	}
+	o.download = o.folder != ""
+	client, err := web.New(web.Config{Timeout: time.Duration(o.timeout) * time.Second, Proxy: o.proxy, Headers: o.headers, Redirects: o.redirects, MaxSize: o.maxSize, Workers: o.workers})
+	if err != nil {
+		return fail(diagnostics, err, 2)
+	}
+	defer client.Close()
+	var store *files.Store
+	if o.folder != "" {
+		store, err = files.NewStore(o.folder)
+		if err != nil {
+			return fail(diagnostics, err, 1)
+		}
+		defer store.Close()
+	}
+	var resultFile *os.File
+	if o.output != "" {
+		resultFile, err = os.Create(o.output)
+		if err != nil {
+			return fail(diagnostics, err, 1)
+		}
+		defer resultFile.Close()
+		output = io.MultiWriter(output, resultFile)
+	}
+	app := collector{options: o, client: client, store: store}
+	err = app.collect(ctx, input, output, diagnostics)
+	if resultFile != nil {
+		err = errors.Join(err, resultFile.Close())
+	}
+	if err != nil {
+		return fail(diagnostics, err, 1)
+	}
+	return 0
 }
 
-func getLinks(webPage string, res []byte) []string{
-
-	var urlParsingPattern = `(?:"|')(((?:[a-zA-Z]{1,10}://|//)[^"'/]{1,}\.[a-zA-Z]{2,}[^"']{0,})|((?:/|\.\./|\./)[^"'><,;| *()(%%$^/\\\[\]][^"'><,;|()]{1,})|([a-zA-Z0-9_\-/]{1,}/[a-zA-Z0-9_\-/]{1,}\.(?:[a-zA-Z]{1,4}|action)(?:[\?|#][^"|']{0,}|))|([a-zA-Z0-9_\-/]{1,}/[a-zA-Z0-9_\-/]{3,}(?:[\?|#][^"|']{0,}|))|([a-zA-Z0-9_\-]{1,}\.(?:php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\?|#][^"|']{0,}|)))(?:"|')`
-	urlParsingRegex, _ := regexp.Compile(urlParsingPattern)
-
-	ignoredFileTypesPattern := `\.js|\.js\?`
-	ignoredFileTypesRegex := regexp.MustCompile(ignoredFileTypesPattern)
-
-	regexLinks := urlParsingRegex.FindAll(res, -1)
-
-	totalLinks:=len(regexLinks)
-
-	var validate bool = true
-	domParse, err:=tld.Parse(webPage)
-	if(err != nil){
-		if(verboseArg){
-			fmt.Printf("DOMPARSE ERROR: %v\n", err)
-		}
-		validate = false
-	}
-			
-	var result []string
-	for _, link := range regexLinks {
-		
-		var addLink bool = false
-
-		u := string(link)
-		
-		// Skip blank entries
-		if len(u) <= 0 {
-			continue
-		}
-		
-		// Remove the single and double quotes from the parsed link on the ends
-		u = strings.Trim(u, "\"")
-		u = strings.Trim(u, "'")
-		
-		//local path => full url
-		p, err := url.Parse(u)
-		if err != nil || p.Scheme == "" || p.Host == "" || p.Path == "" {
-			u=completeUrls(u, webPage)
-			p, err = url.Parse(u)
-			if err != nil || p.Scheme == "" || p.Host == "" || p.Path == "" {
-				continue
-			}
-		}
-
-		matchString := ignoredFileTypesRegex.MatchString(u)
-		if matchString {
-
-			//matching domain name
-			if(validate){
-				if(strings.Contains(u, domParse.SLD)){
-					addLink = true
-					//fmt.Printf("link domain ok: %v\n", u)
-				}else{
-					//fmt.Printf("link err: %v\n", u)
-				}
-			}			
-			
-			//matching name agains our blacklist
-			if(addLink && filter.Exist(files.GetFileNameFromLink(u))){
-				addLink = false
-			}else{
-				//fmt.Printf("link BL OK: %v\n", u)
-			}
-									
-			if(addLink){
-				result = append(result, u)
-			}			
-		}
-	}
-
-	if(verboseArg){
-		fmt.Printf("[%v] total: %v || valid: %v \n", webPage, totalLinks, len(result))
-	}
-
-	return result
-}
-
-func downloadList(workers int, conf web.HTTPConf, list []string){
-
-	targetLinks := make(chan string)
-	var wg sync.WaitGroup
-	
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			for task := range targetLinks {
-				source, err:=web.Get(task, headerArg, conf)
-				if(err == nil){
-					u, err := url.ParseRequestURI(task)
-					if err != nil {
-						if(verboseArg){
-							fmt.Printf("[-] %v => %v\n", u, err)
-							return	
-						} 
-					}
-
-					_, fileName := path.Split(u.Path)
-					output := path.Join(outputFolderArg, u.Host, fileName)					
-					err=files.CreateAndSaveToFile(output, source)
-					if(err != nil){
-						if(verboseArg){
-							fmt.Printf("I can't save the inline script: %v\n", err)
-						} 
-					}
-				}				
-			}
-			wg.Done()
-		}()
-	}
-		
-	for _, line := range list {
-		targetLinks <- line
-	}
-	
-	close(targetLinks)
-	wg.Wait()	
-	
-}
-
-func completeUrls(link string, fullURL string)(string){
-
-	var res string
-
-	u, err := url.ParseRequestURI(fullURL)
-	if(err != nil){
-		return res
-	}
-
-	if strings.HasPrefix(link, "//") {
-		res = u.Scheme + ":" + link
-	} else if strings.HasPrefix(link, "/") && string(link[1]) != "/" {
-		res = u.Scheme + "://" + u.Host + link
-	} else if !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
-		res = u.Scheme + "://" + u.Host + u.Path + "/" + link
-	}
-		
-	return res
+func fail(w io.Writer, err error, code int) int {
+	fmt.Fprintf(w, "linkz: %v\n", err)
+	return code
 }

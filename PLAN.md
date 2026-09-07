@@ -29,6 +29,6 @@ Use local HTTP test servers and HTML fixtures. Run `go test ./...`, `go vet ./..
 ## Progress
 
 - [x] PR 1: Build baseline and plan.
-- [ ] PR 2: Reliable collection.
+- [x] PR 2: Reliable collection.
 - [ ] PR 3: Less repeated work.
 - [ ] PR 4: Useful inventory and final documentation.

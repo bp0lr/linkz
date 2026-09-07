@@ -37,6 +37,12 @@ Download JavaScript files referenced by a page:
 linkz -u https://example.com -f output
 ```
 
+List script URLs without downloading their contents:
+
+```sh
+linkz -u https://example.com -o urls.txt
+```
+
 Also save inline script blocks:
 
 ```sh
@@ -55,7 +61,7 @@ In PowerShell:
 Get-Content urls.txt | linkz -f output --timeout 10
 ```
 
-The current version requires `-f` for normal operation. Providing a folder also enables downloads. Discovered URLs are printed after the download phase.
+Providing a folder enables downloads. Without a folder, Linkz only lists script URLs. `-o` writes the same URLs to a file, replacing previous contents. Diagnostics go to stderr. Results from concurrent pages may arrive in a different order between runs.
 
 ## Options
 
@@ -64,25 +70,28 @@ The current version requires `-f` for normal operation. Providing a folder also 
 | `-u`, `--url` | None | Page URL. If omitted, read URLs from standard input. |
 | `-f`, `--folder` | None | Output folder; also enables downloads. |
 | `-s`, `--save-inline` | `false` | Save inline script blocks. Requires `-f`. |
-| `-w`, `--workers` | `25` | Worker count, from 1 to 150. Invalid values fall back to 25. |
+| `-w`, `--workers` | `25` | Concurrent page workers, from 1 to 150. |
 | `--timeout` | `5` | HTTP request timeout in seconds. |
-| `--follow-redirect` | `false` | Follow HTTP redirects. |
+| `--max-size` | `16777216` | Maximum bytes per response, up to 1 GiB. |
+| `--follow-redirect` | `false` | Follow redirects within the page's origin, up to 10 hops. |
 | `-p`, `--proxy` | None | HTTP proxy URL. |
 | `-H`, `--header` | None | Custom HTTP header in `Name: value` format. Repeat for multiple headers. |
 | `-v`, `--verbose` | `false` | Print additional diagnostics. |
 | `-d`, `--download` | `false` | Enable downloads. Still requires `-f`, which already enables them. |
-| `-o`, `--output` | None | Currently opens a file but does not write results to it. |
-| `--use-pb` | `false` | Accepted, but the progress bar is not implemented. |
+| `-o`, `--output` | None | Write discovered URLs to a file, replacing previous contents. |
+| `--use-pb` | `false` | Legacy option; requesting it returns an argument error. |
 | `-h`, `--help` | | Show command help. |
 
 ## Output and current limitations
 
-- Downloaded files are stored as `<folder>/<host>/<filename>`. Files with the same host and filename can overwrite each other, even when their URLs differ.
-- Inline scripts use random names such as `inline_<id>.txt` inside the page's host folder.
+- Downloaded files are stored as `<folder>/host_<safe-host>/script-<URL-hash>.js`. The complete URL, including query parameters, determines the name. Different paths and query strings produce distinct files.
+- Inline scripts use stable `inline-<identity-hash>.js` names based on page URL and script position. JSON data blocks are excluded.
+- Files are written through temporary files inside the selected output root. Successful reruns replace files with the same identity.
 - A built-in list excludes common JavaScript library filenames and some minified variants. The list is currently not configurable.
-- Extraction uses regular expressions and a fixed JavaScript filename filter. Relative URL handling and domain filtering have known correctness limitations.
-- Results are not deduplicated. Diagnostic messages share standard output with URLs.
-- HTTP error responses are not rejected based on status, and TLS certificate verification is currently disabled.
+- HTML extraction supports `script src`, modules, and the first `<base href>`. Quoted `.js` and `.mjs` references are also collected as a best-effort fallback, without parsing JavaScript syntax.
+- Resources and redirects must keep the page's origin: scheme, hostname, and effective port. CDN hosts, sibling subdomains, and HTTP-to-HTTPS redirects are outside this scope.
+- TLS certificates are verified. Non-2xx responses, responses over the size limit, and file errors are reported. Failed downloads remain in the URL list.
+- Links are deduplicated within each page. Shared scripts across different pages can still be downloaded more than once.
 - Browser-generated script references, configurable file types, and recursive crawling are not supported.
 
 ## Development
@@ -92,7 +101,9 @@ go test ./...
 go vet ./...
 ```
 
-There are currently no automated test files. The commands above check package compilation and static diagnostics; they do not establish behavioral correctness.
+Tests use local HTTP servers and HTML fixtures for extraction, CLI output, storage, response limits, origin policy, and cancellation. See [PLAN.md](PLAN.md) for the PR sequence.
+
+Exit codes: `0` for success or help, `1` for collection or output failures, and `2` for invalid arguments. Ctrl+C cancels pending HTTP work. Already completed files remain available after a failure.
 
 ## Contributing
 

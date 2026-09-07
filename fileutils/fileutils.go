@@ -1,64 +1,73 @@
+// Package fileutils stores scripts within an explicitly selected output root.
 package fileutils
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
-	"io/ioutil"
+	"strings"
+
+	web "github.com/bp0lr/linkz/fetch"
 )
 
-//GetFileNameFromLink desc
-func GetFileNameFromLink(fullFilePath string) string{
-	return filepath.Base(fullFilePath)
-}
+type Store struct{ root *os.Root }
 
-// CreateAndSaveToFile desc
-func CreateAndSaveToFile(fullFilePath string, content []byte) (error){
-	if _, err := MakeFilePath(filepath.Dir(fullFilePath), filepath.Base(fullFilePath)); err != nil {
-		return err
-	} 
-	
-	return ioutil.WriteFile(fullFilePath, content, 0664)
-}
-
-// CreateFile desc
-func CreateFile(filePath string) (*os.File, error) {
-	
-	path, err := MakeFilePath(filepath.Dir(filePath), filepath.Base(filePath))
-	if  err != nil {
+func NewStore(folder string) (*Store, error) {
+	if err := os.MkdirAll(folder, 0750); err != nil {
 		return nil, err
-	} 
-	
-	return os.Create(path)	
+	}
+	root, err := os.OpenRoot(folder)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{root}, nil
 }
 
-//MakeFilePath desc
-func MakeFilePath(dirName, fileName string) (string, error) {
-	if err := EnsureDir(dirName); err != nil {
+func (s *Store) Close() error { return s.root.Close() }
+
+// Save uses the full URL as identity, including query parameters. An inline index
+// of zero denotes an external resource. Successful reruns replace the same file.
+func (s *Store) Save(raw string, inlineIndex int, content []byte) (string, error) {
+	u, err := web.ParseURL(raw)
+	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dirName, fileName), nil
-}
-
-//EnsureDir desc
-func EnsureDir(dirName string, mode ...os.FileMode) error {
-	m := os.FileMode(0750)
-	if len(mode) > 0 {
-		m = mode[0]
+	host := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
+			return r
+		}
+		return '_'
+	}, u.Host)
+	if len(host) > 80 {
+		host = host[:80]
 	}
-
-	err := os.MkdirAll(dirName, m); 
-	if err == nil || os.IsExist(err) {
-		return nil
+	dir := "host_" + host
+	key, prefix := "url:"+u.String(), "script"
+	if inlineIndex > 0 {
+		key, prefix = fmt.Sprintf("inline:%s:%d", u.String(), inlineIndex), "inline"
 	}
-	
-	return err	
-}
-
-//FileExists desc
-func FileExists(path string) bool {
-	// os.Stat获取文件信息
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return false
+	name := filepath.Join(dir, fmt.Sprintf("%s-%x.js", prefix, sha256.Sum256([]byte(key))))
+	if err := s.root.MkdirAll(dir, 0750); err != nil {
+		return "", err
 	}
-	return true
+	tmp := filepath.Join(dir, ".linkz-"+rand.Text()+".tmp")
+	f, err := s.root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return "", err
+	}
+	defer s.root.Remove(tmp)
+	_, writeErr := f.Write(content)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if err := s.root.Rename(tmp, name); err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(name), nil
 }
