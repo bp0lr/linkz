@@ -16,6 +16,9 @@ jobs:
         go: ['1.26.8', '1.27.1']
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Preserve LF line endings for module checks
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
