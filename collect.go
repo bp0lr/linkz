@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
@@ -26,10 +27,19 @@ type downloadEntry struct {
 }
 
 type artifact struct {
-	URL         string
-	File        string
-	Error       string
-	InlineIndex int
+	SchemaVersion int    `json:"schema_version"`
+	Source        string `json:"source"`
+	Page          string `json:"page,omitempty"`
+	Kind          string `json:"kind"`
+	Status        string `json:"status"`
+	URL           string `json:"url,omitempty"`
+	FinalURL      string `json:"final_url,omitempty"`
+	HTTPStatus    int    `json:"http_status,omitempty"`
+	File          string `json:"file,omitempty"`
+	Size          int64  `json:"size_bytes"`
+	SHA256        string `json:"sha256,omitempty"`
+	Error         string `json:"error,omitempty"`
+	InlineIndex   int    `json:"inline_index,omitempty"`
 }
 
 type pageResult struct {
@@ -38,7 +48,7 @@ type pageResult struct {
 	err          error
 }
 
-func (c *collector) collect(ctx context.Context, input io.Reader, output, diagnostics io.Writer) error {
+func (c *collector) collect(ctx context.Context, input io.Reader, output, diagnostics, manifest io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan string)
@@ -46,6 +56,15 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 	inputErr := make(chan error, 1)
 	go func() {
 		defer close(jobs)
+		if c.options.inputHTML != "" {
+			select {
+			case jobs <- c.options.baseURL:
+				inputErr <- nil
+			case <-ctx.Done():
+				inputErr <- ctx.Err()
+			}
+			return
+		}
 		if c.options.url != "" {
 			input = strings.NewReader(c.options.url)
 		}
@@ -86,7 +105,7 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 					if !ok {
 						return
 					}
-					result := c.process(ctx, job)
+					result := c.process(ctx, job, input)
 					select {
 					case results <- result:
 					case <-ctx.Done():
@@ -97,29 +116,15 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 		}()
 	}
 	go func() { workers.Wait(); close(results) }()
-	errorsCount := 0
-	printed := make(map[string]bool)
+	report := newReporter(c.options, output, diagnostics, manifest)
+	defer report.summarize()
 	var writeErr error
 	for result := range results {
-		if result.err != nil {
-			fmt.Fprintf(diagnostics, "%s: %v\n", result.source, result.err)
-			errorsCount++
-			continue
-		}
-		if c.options.verbose {
-			fmt.Fprintf(diagnostics, "%s: %d script records\n", result.source, len(result.artifacts))
-		}
-		for _, a := range result.artifacts {
-			if a.Error != "" {
-				fmt.Fprintf(diagnostics, "%s: %s\n", a.URL, a.Error)
-				errorsCount++
-			}
-			if a.InlineIndex == 0 && !printed[a.URL] && writeErr == nil {
-				printed[a.URL] = true
-				_, writeErr = fmt.Fprintln(output, a.URL)
-				if writeErr != nil {
-					cancel()
-				}
+		if writeErr == nil {
+			writeErr = report.write(result)
+			if writeErr != nil {
+				report.errors++
+				cancel()
 			}
 		}
 	}
@@ -127,31 +132,52 @@ func (c *collector) collect(ctx context.Context, input io.Reader, output, diagno
 		return fmt.Errorf("write results: %w", writeErr)
 	}
 	if ctx.Err() != nil {
+		report.errors++
 		return ctx.Err()
 	}
 	if err := <-inputErr; err != nil {
+		report.errors++
 		return fmt.Errorf("read input: %w", err)
 	}
-	if errorsCount > 0 {
-		return fmt.Errorf("%d collection errors", errorsCount)
+	if report.errors > 0 {
+		return fmt.Errorf("%d collection errors", report.errors)
 	}
 	return nil
 }
 
-func (c *collector) process(ctx context.Context, raw string) pageResult {
+func (c *collector) process(ctx context.Context, raw string, input io.Reader) pageResult {
 	result := pageResult{source: raw}
 	u, err := web.ParseURL(raw)
 	if err != nil {
 		result.err = err
 		return result
 	}
-	body, final, err := c.client.Get(ctx, u.String(), u.String())
+	var body []byte
+	final := u.String()
+	if c.options.inputHTML != "" {
+		result.source = c.options.inputHTML
+		if c.options.inputHTML != "-" {
+			file, openErr := os.Open(c.options.inputHTML)
+			if openErr != nil {
+				result.err = openErr
+				return result
+			}
+			defer file.Close()
+			input = file
+		}
+		body, err = io.ReadAll(io.LimitReader(input, c.options.maxSize+1))
+		if err == nil && int64(len(body)) > c.options.maxSize {
+			err = web.ErrTooLarge
+		}
+	} else {
+		body, final, err = c.client.Get(ctx, u.String(), u.String())
+	}
 	if err != nil {
 		result.err = err
 		return result
 	}
 	result.page = final
-	scripts, err := extract(final, body)
+	scripts, err := extract(final, body, c.options.includeLibs)
 	if err != nil {
 		result.err = err
 		return result
@@ -166,7 +192,9 @@ func (c *collector) process(ctx context.Context, raw string) pageResult {
 	if c.options.inline {
 		for _, block := range scripts.inline {
 			a := artifact{URL: final, InlineIndex: block.index}
-			a.File, err = c.store.Save(final, block.index, block.code)
+			var saved files.Saved
+			saved, err = c.store.Save(final, block.index, block.code)
+			a.File, a.Size, a.SHA256 = saved.File, saved.Size, saved.SHA256
 			if err != nil {
 				a.Error = err.Error()
 			}
@@ -197,7 +225,10 @@ func (c *collector) download(ctx context.Context, link, origin string) artifact 
 	c.downloadMu.Unlock()
 	resp, err := c.client.Open(ctx, link, origin)
 	if err == nil {
-		entry.artifact.File, err = c.store.SaveReader(link, 0, resp.Body)
+		entry.artifact.FinalURL, entry.artifact.HTTPStatus = resp.URL, resp.Status
+		var saved files.Saved
+		saved, err = c.store.SaveReader(link, 0, resp.Body)
+		entry.artifact.File, entry.artifact.Size, entry.artifact.SHA256 = saved.File, saved.Size, saved.SHA256
 		resp.Body.Close()
 	}
 	if err != nil {

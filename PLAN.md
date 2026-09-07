@@ -1,34 +1,34 @@
 # Linkz modernization plan
 
-Four focused PRs, reviewed and merged in order. Each PR is based on the previous branch so its diff only contains its own changes.
+Four separate commits on one working branch. No pull requests are part of this delivery.
 
-| PR | Scope | Acceptance criteria |
+| Commit | Scope | Validation |
 | --- | --- | --- |
-| 1. Build baseline | Require Go 1.26.8, tidy modules, document the existing CLI and this plan. | Packages compile and `go vet` passes with the required Go version. |
-| 2. Reliable collection | Fix listing and `-o`, URL resolution, HTTP errors, scope, TLS defaults, cancellation, and file collisions. Add local regression tests. | Listing works without downloads; distinct URLs cannot overwrite each other; failures are visible on stderr and return a nonzero status. |
-| 3. Less repeated work | Reuse HTTP connections, deduplicate page and resource requests, stream downloads to disk, and precompute library exclusions. | Local tests verify request reuse and bounded downloads; benchmarks report allocations for extraction and library filtering. |
-| 4. Useful inventory | Add `--include-libs`, `--stats`, `--version`, a JSONL manifest with SHA-256, and local HTML input. Update README and add CI. | Manifest records preserve provenance and match saved bytes; local HTML mode makes no network requests; CLI examples and flags match the implementation. |
+| 1. Build baseline | Go 1.26.8, module cleanup, documentation and work plan. | Compilation and static analysis with the required Go version. |
+| 2. Reliable collection | Listing without downloads, working `-o`, URL resolution, origin scope, TLS, HTTP errors, size limits, cancellation, and distinct storage paths. | Local regression tests for CLI, extraction, HTTP, and files. |
+| 3. Less repeated work | Shared HTTP connections, page/resource deduplication, streamed downloads, precalculated library exclusions. | Request counts, connection reuse, failed-write preservation, and recorded microbenchmarks. |
+| 4. Useful inventory | `--include-libs`, `--stats`, `--version`, JSONL manifest, SHA-256, offline HTML input, README and CI. | Provenance, hashes, output conflicts, writer errors, and absence of HTTP requests in local mode. |
 
-## Product scope
+## Decisions
 
-Linkz collects JavaScript referenced by explicitly supplied pages. Keep it small and useful for producing a local collection with provenance. Browser automation, recursive crawling, content-based deduplication across runs, and change monitoring are deferred.
+- Preserve useful short flags. `-f` enables downloads in HTTP mode; `--use-pb` becomes a deprecated statistics alias.
+- Keep stdout for unique resource URLs and stderr for diagnostics.
+- Replace URL output and manifest files on each run. Preserve per-page provenance in the manifest even when a download is shared.
+- Restrict resources and redirects to the original page origin; verify TLS certificates.
+- Use stable, filesystem-safe identities for stored scripts and separate content hashes in the manifest.
+- Make local HTML mode work without any HTTP requests.
 
-## Compatibility decisions
+## Completed
 
-- Keep existing short flags where they have useful behavior. `-f` continues to enable downloads.
-- Make `--help` successful, validate arguments before work, and reserve stdout for results.
-- Make output files replace the previous result list instead of silently accumulating stale results.
-- Restrict resources and redirects to the page's origin; verify TLS certificates by default.
-- Use stable, filesystem-safe filenames that distinguish complete URLs, including query strings.
-- Keep proposed features out of usage documentation until implemented.
+- [x] Build baseline.
+- [x] Reliable collection and regression tests.
+- [x] Reduced repeated work and local measurements.
+- [x] Inventory features, offline mode, documentation, and CI configuration.
 
-## Validation
+## Deferred
 
-Use local HTTP test servers and HTML fixtures. Run `go test ./...`, `go vet ./...`, and relevant benchmarks. Run the race detector where the toolchain supports it. Do not use public websites as test targets.
+Browser automation, recursive crawling, configurable extra origins, content-based deduplication across runs, persistent cache, and automatic change monitoring. The current scope is a small JavaScript collector with a useful local inventory.
 
-## Progress
+## Checks
 
-- [x] PR 1: Build baseline and plan.
-- [x] PR 2: Reliable collection.
-- [x] PR 3: Less repeated work.
-- [ ] PR 4: Useful inventory and final documentation.
+Use local HTTP servers and HTML fixtures, not public websites. Run `go test ./...`, `go vet ./...`, and `go mod tidy -diff`. The CI configuration covers Windows/Linux and runs the race detector on Linux; configuring CI does not imply that remote jobs have run.

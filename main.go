@@ -16,21 +16,24 @@ import (
 
 type options struct {
 	url, output, folder, proxy           string
+	manifest, inputHTML, baseURL         string
 	headers                              []string
 	workers, timeout                     int
 	maxSize                              int64
 	download, inline, redirects, verbose bool
+	includeLibs, stats                   bool
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
 func run(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer) int {
 	var o options
-	var help, progress bool
+	var help, showVersion bool
 	flags := pflag.NewFlagSet("linkz", pflag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	flags.StringVarP(&o.url, "url", "u", "", "Page URL; otherwise read URLs from stdin")
@@ -45,7 +48,14 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	flags.BoolVar(&o.redirects, "follow-redirect", false, "Follow redirects within the page origin")
 	flags.StringVarP(&o.proxy, "proxy", "p", "", "HTTP or HTTPS proxy URL")
 	flags.StringArrayVarP(&o.headers, "header", "H", nil, "HTTP header in Name: value format (repeatable)")
-	flags.BoolVar(&progress, "use-pb", false, "Reserved legacy option")
+	flags.BoolVar(&o.includeLibs, "include-libs", false, "Include bundled library filenames")
+	flags.BoolVar(&o.stats, "stats", false, "Print final collection totals to stderr")
+	flags.BoolVar(&o.stats, "use-pb", false, "Alias for --stats")
+	flags.MarkDeprecated("use-pb", "use --stats")
+	flags.BoolVar(&showVersion, "version", false, "Show build version")
+	flags.StringVar(&o.manifest, "manifest", "", "Write a JSONL inventory (replace existing contents)")
+	flags.StringVar(&o.inputHTML, "input-html", "", "Read local HTML without HTTP requests; use - for stdin")
+	flags.StringVar(&o.baseURL, "base-url", "", "Absolute page URL for --input-html")
 	flags.BoolVarP(&help, "help", "h", false, "Show help")
 	if err := flags.Parse(args); err != nil {
 		return fail(diagnostics, err, 2)
@@ -54,6 +64,12 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		fmt.Fprintln(output, "Linkz collects JavaScript from explicitly supplied pages.\n\nUsage: linkz [options]")
 		flags.SetOutput(output)
 		flags.PrintDefaults()
+		return 0
+	}
+	if showVersion {
+		if _, err := fmt.Fprintln(output, "linkz "+buildVersion()); err != nil {
+			return fail(diagnostics, err, 1)
+		}
 		return 0
 	}
 	if flags.NArg() != 0 {
@@ -71,15 +87,25 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if (o.download || o.inline) && o.folder == "" {
 		return fail(diagnostics, errors.New("download and save-inline require --folder"), 2)
 	}
-	if progress {
-		return fail(diagnostics, errors.New("use-pb is not implemented"), 2)
+	if o.inputHTML != "" {
+		if o.url != "" || o.download {
+			return fail(diagnostics, errors.New("input-html cannot be combined with url or download"), 2)
+		}
+		if _, err := web.ParseURL(o.baseURL); err != nil {
+			return fail(diagnostics, errors.New("input-html requires an absolute HTTP or HTTPS base-url"), 2)
+		}
+	} else if o.baseURL != "" {
+		return fail(diagnostics, errors.New("base-url requires input-html"), 2)
+	}
+	if err := validatePaths(o); err != nil {
+		return fail(diagnostics, err, 2)
 	}
 	if o.url != "" {
 		if _, err := web.ParseURL(o.url); err != nil {
 			return fail(diagnostics, err, 2)
 		}
 	}
-	o.download = o.folder != ""
+	o.download = o.folder != "" && o.inputHTML == ""
 	client, err := web.New(web.Config{Timeout: time.Duration(o.timeout) * time.Second, Proxy: o.proxy, Headers: o.headers, Redirects: o.redirects, MaxSize: o.maxSize, Workers: o.workers})
 	if err != nil {
 		return fail(diagnostics, err, 2)
@@ -94,6 +120,16 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		defer store.Close()
 	}
 	var resultFile *os.File
+	var manifestFile *os.File
+	var manifest io.Writer
+	if o.manifest != "" {
+		manifestFile, err = os.Create(o.manifest)
+		if err != nil {
+			return fail(diagnostics, err, 1)
+		}
+		defer manifestFile.Close()
+		manifest = manifestFile
+	}
 	if o.output != "" {
 		resultFile, err = os.Create(o.output)
 		if err != nil {
@@ -103,9 +139,12 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		output = io.MultiWriter(output, resultFile)
 	}
 	app := collector{options: o, client: client, store: store}
-	err = app.collect(ctx, input, output, diagnostics)
+	err = app.collect(ctx, input, output, diagnostics, manifest)
 	if resultFile != nil {
 		err = errors.Join(err, resultFile.Close())
+	}
+	if manifestFile != nil {
+		err = errors.Join(err, manifestFile.Close())
 	}
 	if err != nil {
 		return fail(diagnostics, err, 1)

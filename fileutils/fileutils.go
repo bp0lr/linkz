@@ -16,6 +16,12 @@ import (
 
 type Store struct{ root *os.Root }
 
+type Saved struct {
+	File   string
+	Size   int64
+	SHA256 string
+}
+
 func NewStore(folder string) (*Store, error) {
 	if err := os.MkdirAll(folder, 0750); err != nil {
 		return nil, err
@@ -30,17 +36,17 @@ func NewStore(folder string) (*Store, error) {
 func (s *Store) Close() error { return s.root.Close() }
 
 // Save uses the full URL as identity, including query parameters. An inline index
-// of zero denotes an external resource. Successful reruns replace the same file.
-func (s *Store) Save(raw string, inlineIndex int, content []byte) (string, error) {
+// of zero denotes an external resource. Inline identities also include content.
+func (s *Store) Save(raw string, inlineIndex int, content []byte) (Saved, error) {
 	return s.SaveReader(raw, inlineIndex, bytes.NewReader(content))
 }
 
 // SaveReader streams the source into a temporary file. A failed read leaves any
 // previous complete file in place and removes the temporary file.
-func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (string, error) {
+func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (Saved, error) {
 	u, err := web.ParseURL(raw)
 	if err != nil {
-		return "", err
+		return Saved{}, err
 	}
 	host := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
@@ -56,26 +62,31 @@ func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (stri
 	if inlineIndex > 0 {
 		key, prefix = fmt.Sprintf("inline:%s:%d", u.String(), inlineIndex), "inline"
 	}
-	name := filepath.Join(dir, fmt.Sprintf("%s-%x.js", prefix, sha256.Sum256([]byte(key))))
 	if err := s.root.MkdirAll(dir, 0750); err != nil {
-		return "", err
+		return Saved{}, err
 	}
 	tmp := filepath.Join(dir, ".linkz-"+rand.Text()+".tmp")
 	f, err := s.root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
-		return "", err
+		return Saved{}, err
 	}
 	defer s.root.Remove(tmp)
-	_, writeErr := io.Copy(f, content)
+	hash := sha256.New()
+	size, writeErr := io.Copy(io.MultiWriter(f, hash), content)
 	closeErr := f.Close()
 	if writeErr != nil {
-		return "", writeErr
+		return Saved{}, writeErr
 	}
 	if closeErr != nil {
-		return "", closeErr
+		return Saved{}, closeErr
 	}
+	digest := fmt.Sprintf("%x", hash.Sum(nil))
+	if inlineIndex > 0 {
+		key += ":" + digest
+	}
+	name := filepath.Join(dir, fmt.Sprintf("%s-%x.js", prefix, sha256.Sum256([]byte(key))))
 	if err := s.root.Rename(tmp, name); err != nil {
-		return "", err
+		return Saved{}, err
 	}
-	return filepath.ToSlash(name), nil
+	return Saved{File: filepath.ToSlash(name), Size: size, SHA256: digest}, nil
 }

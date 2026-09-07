@@ -27,7 +27,7 @@ type pageScripts struct {
 	inline []inlineScript
 }
 
-func extract(page string, source []byte) (pageScripts, error) {
+func extract(page string, source []byte, includeLibs bool) (pageScripts, error) {
 	origin, err := web.ParseURL(page)
 	if err != nil {
 		return pageScripts{}, err
@@ -100,7 +100,7 @@ resolved:
 			continue
 		}
 		u, err := web.ParseURL(base.ResolveReference(ref).String())
-		if err != nil || !web.SameOrigin(origin, u) || filter.Exist(path.Base(u.Path)) {
+		if err != nil || !web.SameOrigin(origin, u) || (!includeLibs && filter.Exist(path.Base(u.Path))) {
 			continue
 		}
 		if !seen[u.String()] {
