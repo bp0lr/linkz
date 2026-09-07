@@ -91,7 +91,8 @@ Providing a folder enables downloads. Without a folder, Linkz only lists script 
 - HTML extraction supports `script src`, modules, and the first `<base href>`. Quoted `.js` and `.mjs` references are also collected as a best-effort fallback, without parsing JavaScript syntax.
 - Resources and redirects must keep the page's origin: scheme, hostname, and effective port. CDN hosts, sibling subdomains, and HTTP-to-HTTPS redirects are outside this scope.
 - TLS certificates are verified. Non-2xx responses, responses over the size limit, and file errors are reported. Failed downloads remain in the URL list.
-- Links are deduplicated within each page. Shared scripts across different pages can still be downloaded more than once.
+- Page URLs and printed resource URLs are deduplicated per run. Shared scripts are downloaded once, including when referenced concurrently. Failed downloads are also cached for the run; there are no automatic retries.
+- HTTP connections are reused, downloads stream to disk, and library exclusions are precalculated. HTML response buffers are bounded by `--max-size`; bookkeeping grows with unique URLs.
 - Browser-generated script references, configurable file types, and recursive crawling are not supported.
 
 ## Development

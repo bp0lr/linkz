@@ -1,9 +1,25 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func BenchmarkExtract(b *testing.B) {
+	var html strings.Builder
+	for i := 0; i < 64; i++ {
+		fmt.Fprintf(&html, `<script src="/app%d.js"></script>`, i)
+	}
+	source := []byte(html.String())
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := extract("https://example.test/", source); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func TestExtractReferences(t *testing.T) {
 	source := []byte(`<base href="/assets/"><script src="app.js?v=1&amp;x=2"></script><script type="module" src="./module.mjs"></script><script src="/serve?id=1"></script><script src="jquery.min.js?v=2"></script><script>const other = "../extra.js";</script>`)

@@ -4,11 +4,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestConnectionReuse(t *testing.T) {
+	var connections atomic.Int64
+	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	s.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	s.Start()
+	defer s.Close()
+	c := testClient(t, 1024, false)
+	for i := 0; i < 4; i++ {
+		if _, _, err := c.Get(context.Background(), s.URL, s.URL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if connections.Load() != 1 {
+		t.Fatalf("connections=%d", connections.Load())
+	}
+}
 
 func testClient(t *testing.T, max int64, redirects bool) *Client {
 	t.Helper()

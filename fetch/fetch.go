@@ -44,6 +44,10 @@ func New(conf Config) (*Client, error) {
 		return nil, errors.New("invalid HTTP limits")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = conf.Workers * 2
+	transport.MaxIdleConnsPerHost = conf.Workers
+	transport.MaxConnsPerHost = conf.Workers
+	transport.IdleConnTimeout = 90 * time.Second
 	if conf.Proxy != "" {
 		proxy, err := url.Parse(conf.Proxy)
 		if err != nil || proxy.Hostname() == "" || (proxy.Scheme != "http" && proxy.Scheme != "https") {

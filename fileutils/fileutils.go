@@ -2,9 +2,11 @@
 package fileutils
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +32,12 @@ func (s *Store) Close() error { return s.root.Close() }
 // Save uses the full URL as identity, including query parameters. An inline index
 // of zero denotes an external resource. Successful reruns replace the same file.
 func (s *Store) Save(raw string, inlineIndex int, content []byte) (string, error) {
+	return s.SaveReader(raw, inlineIndex, bytes.NewReader(content))
+}
+
+// SaveReader streams the source into a temporary file. A failed read leaves any
+// previous complete file in place and removes the temporary file.
+func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (string, error) {
 	u, err := web.ParseURL(raw)
 	if err != nil {
 		return "", err
@@ -58,7 +66,7 @@ func (s *Store) Save(raw string, inlineIndex int, content []byte) (string, error
 		return "", err
 	}
 	defer s.root.Remove(tmp)
-	_, writeErr := f.Write(content)
+	_, writeErr := io.Copy(f, content)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return "", writeErr

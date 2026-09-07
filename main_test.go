@@ -9,8 +9,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestDeduplicatePagesAndSharedDownloads(t *testing.T) {
+	var pages, scripts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app.js" {
+			scripts.Add(1)
+			fmt.Fprint(w, "app")
+			return
+		}
+		pages.Add(1)
+		fmt.Fprint(w, `<script src="/app.js"></script>`)
+	}))
+	defer server.Close()
+	input := server.URL + "/one\n" + server.URL + "/one#fragment\n" + server.URL + "/two\n"
+	code, out, diag := cli(t, input, "-f", t.TempDir(), "-w", "3")
+	if code != 0 || pages.Load() != 2 || scripts.Load() != 1 || out != server.URL+"/app.js\n" {
+		t.Fatalf("code=%d pages=%d scripts=%d out=%q diag=%q", code, pages.Load(), scripts.Load(), out, diag)
+	}
+}
 
 func cli(t *testing.T, stdin string, args ...string) (int, string, string) {
 	t.Helper()
