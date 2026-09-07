@@ -184,6 +184,7 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 		result.err = err
 		return result
 	}
+	result.page = u.String()
 	var body []byte
 	final := u.String()
 	if c.options.inputHTML != "" {

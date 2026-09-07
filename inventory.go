@@ -98,13 +98,13 @@ func (r *reporter) write(page pageResult) error {
 	if page.err != nil {
 		r.errors++
 		fmt.Fprintf(r.diagnostics, "%s: %v\n", page.source, page.err)
-		return r.record(artifact{SchemaVersion: 1, Source: page.source, Page: page.page, Kind: "page_error", Status: "error", Error: page.err.Error()})
+		return r.record(artifact{SchemaVersion: manifestVersion, Source: page.source, Page: page.page, Kind: "page_error", Status: "error", Error: page.err.Error()})
 	}
 	if r.options.verbose {
 		fmt.Fprintf(r.diagnostics, "%s: %d script records\n", page.source, len(page.artifacts))
 	}
 	for _, a := range page.artifacts {
-		a.SchemaVersion, a.Source, a.Page = 1, page.source, page.page
+		a.SchemaVersion, a.Source, a.Page = manifestVersion, page.source, page.page
 		a.Kind, a.Status = "external", "listed"
 		if a.InlineIndex > 0 {
 			a.Kind = "inline"
@@ -130,7 +130,7 @@ func (r *reporter) write(page pageResult) error {
 			return err
 		}
 	}
-	return nil
+	return r.record(artifact{SchemaVersion: manifestVersion, Source: page.source, Page: page.page, Kind: "page", Status: "processed"})
 }
 
 func (r *reporter) record(a artifact) error {

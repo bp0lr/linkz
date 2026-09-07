@@ -33,7 +33,9 @@ func readManifest(t *testing.T, name string) []artifact {
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		records = append(records, record)
+		if record.Kind != "page" {
+			records = append(records, record)
+		}
 	}
 	return records
 }
@@ -66,7 +68,7 @@ func TestManifestPreservesProvenanceAndHashes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if record.SchemaVersion != 1 || record.Kind != "external" || record.Status != "saved" || record.Page != record.Source || record.Size != int64(len(data)) || record.SHA256 != fmt.Sprintf("%x", sha256.Sum256(data)) || record.HTTPStatus != 200 || record.FinalURL != record.URL {
+		if record.SchemaVersion != manifestVersion || record.Kind != "external" || record.Status != "saved" || record.Page != record.Source || record.Size != int64(len(data)) || record.SHA256 != fmt.Sprintf("%x", sha256.Sum256(data)) || record.HTTPStatus != 200 || record.FinalURL != record.URL {
 			t.Fatalf("record=%+v", record)
 		}
 	}

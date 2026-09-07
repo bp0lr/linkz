@@ -33,6 +33,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer) int {
+	if len(args) > 0 && args[0] == "diff" {
+		return runDiff(args[1:], output, diagnostics)
+	}
 	var o options
 	var help, showVersion bool
 	flags := pflag.NewFlagSet("linkz", pflag.ContinueOnError)
@@ -63,7 +66,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		return fail(diagnostics, err, 2)
 	}
 	if help {
-		fmt.Fprintln(output, "Linkz collects JavaScript from explicitly supplied pages.\n\nUsage: linkz [options]")
+		fmt.Fprintln(output, "Linkz collects JavaScript from explicitly supplied pages.\n\nUsage: linkz [options]\n       linkz diff BEFORE.jsonl AFTER.jsonl [options]")
 		flags.SetOutput(output)
 		flags.PrintDefaults()
 		return 0

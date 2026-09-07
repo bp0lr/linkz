@@ -84,20 +84,36 @@ linkz --input-html page.html --base-url https://example.com/ -f output -s --mani
 
 Use `--input-html -` to read HTML from stdin. This mode never fetches the base URL or external scripts. `-f` supplies storage for inline scripts only. `--url` and `--download` cannot be combined with local HTML input.
 
+## Compare inventories
+
+Compare two local snapshots without network requests:
+
+```sh
+linkz diff before.jsonl after.jsonl -o changes.jsonl
+```
+
+The command writes deterministic JSONL differences to stdout and optionally `-o`, with totals on stderr. Changes are `added`, `removed`, `changed`, `unchanged`, or `unknown`. Unchanged entries are omitted unless `--all` is supplied. Successful comparisons return exit code 0 even when differences are found; invalid input or I/O failures return 1, and argument errors return 2.
+
+External references are matched by input page and resource URL. Inline blocks are matched by page and script position, with content changes determined by SHA-256. Local HTML snapshots use their base page URL, so different input filenames can be compared. A renamed bundle appears as an addition and removal; inline positions can shift when script elements are inserted.
+
+Manifest version 2 includes a completion record for every processed page, including pages with no scripts. Missing or failed pages are not treated as removals. Listed-only or failed resource records cannot establish content equality and appear as `unknown`. Version 1 manifests remain readable, but their missing completion markers limit conclusions about additions, removals, and page completeness. Malformed records and conflicting duplicates are rejected.
+
+Compare runs with matching input pages, origin allowlists, library filters, and inline settings. Differences describe the inventories, not proof of changes on the live website. Each input must be a regular JSONL file of at most 256 MiB, with records no larger than 8 MiB.
+
 ## Output and inventory
 
 Stdout contains unique external script URLs. `-o` writes the same list to a file. Logs and optional statistics go to stderr. Output order may vary with concurrent workers.
 
-`--manifest` writes JSONL with one record per page/resource relationship, plus inline records when `-s` is used. A shared script can have multiple manifest records while being downloaded once. Page failures are recorded with `kind: "page_error"`.
+`--manifest` writes JSONL with one record per page/resource relationship, plus inline records when `-s` is used. A shared script can have multiple manifest records while being downloaded once within its input origin. Page failures use `kind: "page_error"`; successfully processed pages end with `kind: "page"` and `status: "processed"`.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Inventory format version, currently `1`. |
+| `schema_version` | Inventory format version, currently `2`. |
 | `source` | Input page URL, local HTML filename, or `-` for HTML from stdin. |
 | `origin` | Input page origin used for request scope and header isolation. |
 | `page` | Final page URL used for extraction, when available. |
-| `kind` | `external`, `inline`, or `page_error`. |
-| `status` | `listed`, `saved`, or `error`. |
+| `kind` | `external`, `inline`, `page`, or `page_error`. |
+| `status` | `listed`, `saved`, `error`, or `processed` for page completion records. |
 | `url` | Discovered resource URL; for inline code, the page URL. |
 | `final_url`, `http_status` | Final external resource URL and successful HTTP response status, when available. |
 | `file` | Saved path relative to `--folder`, using forward slashes. |
@@ -153,7 +169,7 @@ The legacy `--use-pb` flag is a deprecated alias for `--stats`; there is no anim
 - The bundled library filter matches filenames and selected minified variants, case-insensitively. It does not detect library versions or inspect their contents.
 - URLs are deduplicated per run, including fragment-only differences. Download successes and failures are cached for the run. There are no automatic retries or persistent cache.
 - HTTP connections are reused, downloads stream to disk through a bounded worker queue, and exclusions are precalculated. A single page can download multiple scripts concurrently. HTML buffers are bounded by `--max-size` per page worker; bookkeeping grows with unique URLs.
-- Linkz does not recursively crawl pages, execute JavaScript, follow module imports, deduplicate by content, or compare successive inventories automatically.
+- Linkz does not recursively crawl pages, execute JavaScript, follow module imports, deduplicate by content, or schedule comparisons automatically.
 
 Exit codes: `0` for success, help, or version; `1` for collection or output failures; `2` for invalid arguments. Ctrl+C cancels pending HTTP work.
 
