@@ -44,6 +44,27 @@ func (s *Store) Save(raw string, inlineIndex int, content []byte) (Saved, error)
 // SaveReader streams the source into a temporary file. A failed read leaves any
 // previous complete file in place and removes the temporary file.
 func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (Saved, error) {
+	return s.saveReader(raw, inlineIndex, content, "")
+}
+
+// SaveResource keeps representations from different input origins separate.
+func (s *Store) SaveResource(raw, origin string, content io.Reader) (Saved, error) {
+	u, err := web.ParseURL(raw)
+	if err != nil {
+		return Saved{}, err
+	}
+	root, err := web.ParseURL(origin)
+	if err != nil {
+		return Saved{}, err
+	}
+	identity := ""
+	if !web.SameOrigin(root, u) {
+		identity = web.Origin(root)
+	}
+	return s.saveReader(raw, 0, content, identity)
+}
+
+func (s *Store) saveReader(raw string, inlineIndex int, content io.Reader, identity string) (Saved, error) {
 	u, err := web.ParseURL(raw)
 	if err != nil {
 		return Saved{}, err
@@ -59,6 +80,9 @@ func (s *Store) SaveReader(raw string, inlineIndex int, content io.Reader) (Save
 	}
 	dir := "host_" + host
 	key, prefix := "url:"+u.String(), "script"
+	if identity != "" {
+		key += "\x00origin:" + identity
+	}
 	if inlineIndex > 0 {
 		key, prefix = fmt.Sprintf("inline:%s:%d", u.String(), inlineIndex), "inline"
 	}

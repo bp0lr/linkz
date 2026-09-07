@@ -35,6 +35,7 @@ type downloadEntry struct {
 type artifact struct {
 	SchemaVersion int    `json:"schema_version"`
 	Source        string `json:"source"`
+	Origin        string `json:"origin,omitempty"`
 	Page          string `json:"page,omitempty"`
 	Kind          string `json:"kind"`
 	Status        string `json:"status"`
@@ -178,6 +179,11 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 		result.err = err
 		return result
 	}
+	scope, err := c.client.Scope(raw)
+	if err != nil {
+		result.err = err
+		return result
+	}
 	var body []byte
 	final := u.String()
 	if c.options.inputHTML != "" {
@@ -203,7 +209,7 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 		return result
 	}
 	result.page = final
-	scripts, err := extract(final, body, c.options.includeLibs)
+	scripts, err := extract(final, body, c.options.includeLibs, scope)
 	if err != nil {
 		result.err = err
 		return result
@@ -211,11 +217,11 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 	pending := make([]*downloadEntry, len(scripts.links))
 	if c.options.download {
 		for i, link := range scripts.links {
-			pending[i] = c.scheduleDownload(ctx, link, final)
+			pending[i] = c.scheduleDownload(ctx, link, web.Origin(u))
 		}
 	}
 	for i, link := range scripts.links {
-		a := artifact{URL: link}
+		a := artifact{URL: link, Origin: web.Origin(u)}
 		if c.options.download {
 			select {
 			case <-pending[i].ready:
@@ -228,7 +234,7 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 	}
 	if c.options.inline {
 		for _, block := range scripts.inline {
-			a := artifact{URL: final, InlineIndex: block.index}
+			a := artifact{URL: final, Origin: web.Origin(u), InlineIndex: block.index}
 			var saved files.Saved
 			saved, err = c.store.Save(final, block.index, block.code)
 			a.File, a.Size, a.SHA256 = saved.File, saved.Size, saved.SHA256
@@ -244,16 +250,17 @@ func (c *collector) process(ctx context.Context, raw string, input io.Reader) pa
 // Cache both successes and failures for this run. Concurrent pages referencing
 // the same URL wait for one download while retaining their own provenance.
 func (c *collector) scheduleDownload(ctx context.Context, link, origin string) *downloadEntry {
+	key := origin + "\x00" + link
 	c.downloadMu.Lock()
 	if c.downloads == nil {
 		c.downloads = make(map[string]*downloadEntry)
 	}
-	if entry, exists := c.downloads[link]; exists {
+	if entry, exists := c.downloads[key]; exists {
 		c.downloadMu.Unlock()
 		return entry
 	}
-	entry := &downloadEntry{ready: make(chan struct{}), artifact: artifact{URL: link}}
-	c.downloads[link] = entry
+	entry := &downloadEntry{ready: make(chan struct{}), artifact: artifact{URL: link, Origin: origin}}
+	c.downloads[key] = entry
 	c.downloadMu.Unlock()
 	select {
 	case c.downloadJobs <- downloadTask{link, origin, entry}:
@@ -270,7 +277,7 @@ func (c *collector) fetchResource(ctx context.Context, task downloadTask) {
 	if err == nil {
 		entry.artifact.FinalURL, entry.artifact.HTTPStatus = resp.URL, resp.Status
 		var saved files.Saved
-		saved, err = c.store.SaveReader(task.link, 0, resp.Body)
+		saved, err = c.store.SaveResource(task.link, task.origin, resp.Body)
 		entry.artifact.File, entry.artifact.Size, entry.artifact.SHA256 = saved.File, saved.Size, saved.SHA256
 		resp.Body.Close()
 	}

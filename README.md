@@ -56,6 +56,18 @@ In PowerShell:
 Get-Content urls.txt | linkz -f output --manifest manifest.jsonl --timeout 10
 ```
 
+## Additional script origins
+
+Allow a specific CDN while keeping all other external origins excluded:
+
+```sh
+linkz -u https://example.com --allow-origin https://cdn.example.com -f output --manifest manifest.jsonl
+```
+
+Repeat `--allow-origin` for multiple origins. Each value must contain a scheme and host, with an optional port. Paths, credentials and wildcards are not accepted. `--follow-redirect` is still required to follow redirects. Redirects retain the original input page's scope, plus the explicit allowlist.
+
+Custom `-H` headers are sent only to the input page's own origin. Allowed CDNs receive the default Linkz headers, including when reached through redirects. Downloads are deduplicated within each input origin; representations requested from different input origins use separate storage identities.
+
 ## Saved HTML without network requests
 
 Use `--base-url` to identify the original page and resolve relative references:
@@ -82,6 +94,7 @@ Stdout contains unique external script URLs. `-o` writes the same list to a file
 | --- | --- |
 | `schema_version` | Inventory format version, currently `1`. |
 | `source` | Input page URL, local HTML filename, or `-` for HTML from stdin. |
+| `origin` | Input page origin used for request scope and header isolation. |
 | `page` | Final page URL used for extraction, when available. |
 | `kind` | `external`, `inline`, or `page_error`. |
 | `status` | `listed`, `saved`, or `error`. |
@@ -94,7 +107,7 @@ Stdout contains unique external script URLs. `-o` writes the same list to a file
 
 Files are stored under `<folder>/host_<safe-host>/`:
 
-- External scripts use `script-<identity-hash>.js`. Identity includes the full normalized URL and its query string, so different paths and query strings produce distinct names.
+- External scripts use `script-<identity-hash>.js`. Identity includes the full normalized URL and its query string. For cross-origin resources it also includes the input page origin, preventing different request contexts from overwriting each other.
 - Inline scripts use `inline-<identity-hash>.js`. Identity includes page URL, script position, and content hash. A changed inline block gets a new filename.
 - The hash in the filename is an identity hash. The manifest's `sha256` is the hash of the actual file contents.
 - Downloads stream into temporary files within the selected output root. A failed read or write leaves any previous complete file in place and removes the temporary file.
@@ -121,7 +134,8 @@ Both `-o` and `--manifest` replace previous contents. Input HTML, URL output, an
 | `-w`, `--workers` | `25` | Maximum concurrent HTTP requests, from 1 to 150, shared across page and script workers and all hosts. |
 | `--timeout` | `5` | Total HTTP request timeout in seconds, from 1 to 86400. |
 | `--max-size` | `16777216` | Maximum bytes per HTTP response or local HTML input, from 1 byte to 1 GiB. |
-| `--follow-redirect` | `false` | Follow redirects within the page origin, up to 10 hops. |
+| `--follow-redirect` | `false` | Follow redirects within allowed origins, up to 10 hops. |
+| `--allow-origin` | None | Additional exact HTTP(S) origin for scripts and redirects. Repeat for multiple origins. |
 | `-p`, `--proxy` | None | HTTP or HTTPS proxy URL. Standard Go proxy environment variables also apply. |
 | `-H`, `--header` | None | HTTP header in `Name: value` format. Repeat for multiple headers; the last value for a name wins. Overriding `Host` is not supported. |
 | `-v`, `--verbose` | `false` | Print page diagnostics to stderr. |
@@ -132,7 +146,7 @@ The legacy `--use-pb` flag is a deprecated alias for `--stats`; there is no anim
 
 ## Scope and limitations
 
-- Resources and redirects must retain the page origin: scheme, hostname, and effective port. CDN hosts, sibling subdomains, and HTTP-to-HTTPS redirects are outside this scope. Supply the final HTTPS page URL directly when appropriate.
+- Resources and redirects must match the input page origin or an explicit `--allow-origin` value, including scheme and effective port. There is no implicit trust of sibling subdomains or all CDNs.
 - TLS certificates are verified. Non-2xx responses, oversized responses, and file errors are reported. Failed external downloads remain in the URL list and have error records in the manifest.
 - HTML extraction supports script elements, modules, and the first `<base href>`. JSON data blocks are not saved as inline JavaScript.
 - Quoted `.js` and `.mjs` references are also collected as a best-effort fallback. This is not a JavaScript parser and can include unused references.

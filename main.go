@@ -18,6 +18,7 @@ type options struct {
 	url, output, folder, proxy           string
 	manifest, inputHTML, baseURL         string
 	headers                              []string
+	allowedOrigins                       []string
 	workers, timeout                     int
 	maxSize                              int64
 	download, inline, redirects, verbose bool
@@ -45,7 +46,8 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	flags.IntVarP(&o.workers, "workers", "w", 25, "Maximum concurrent HTTP requests (1-150)")
 	flags.IntVar(&o.timeout, "timeout", 5, "HTTP request timeout in seconds")
 	flags.Int64Var(&o.maxSize, "max-size", 16<<20, "Maximum bytes per response (1-1073741824)")
-	flags.BoolVar(&o.redirects, "follow-redirect", false, "Follow redirects within the page origin")
+	flags.BoolVar(&o.redirects, "follow-redirect", false, "Follow redirects within allowed origins")
+	flags.StringArrayVar(&o.allowedOrigins, "allow-origin", nil, "Additional exact HTTP(S) origin for scripts and redirects (repeatable)")
 	flags.StringVarP(&o.proxy, "proxy", "p", "", "HTTP or HTTPS proxy URL")
 	flags.StringArrayVarP(&o.headers, "header", "H", nil, "HTTP header in Name: value format (repeatable)")
 	flags.BoolVar(&o.includeLibs, "include-libs", false, "Include bundled library filenames")
@@ -106,7 +108,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		}
 	}
 	o.download = o.folder != "" && o.inputHTML == ""
-	client, err := web.New(web.Config{Timeout: time.Duration(o.timeout) * time.Second, Proxy: o.proxy, Headers: o.headers, Redirects: o.redirects, MaxSize: o.maxSize, Workers: o.workers})
+	client, err := web.New(web.Config{Timeout: time.Duration(o.timeout) * time.Second, Proxy: o.proxy, Headers: o.headers, Redirects: o.redirects, MaxSize: o.maxSize, Workers: o.workers, AllowedOrigins: o.allowedOrigins})
 	if err != nil {
 		return fail(diagnostics, err, 2)
 	}

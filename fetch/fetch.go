@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,12 +19,13 @@ import (
 var ErrTooLarge = errors.New("response exceeds max-size")
 
 type Config struct {
-	Timeout   time.Duration
-	Proxy     string
-	Headers   []string
-	Redirects bool
-	MaxSize   int64
-	Workers   int
+	Timeout        time.Duration
+	Proxy          string
+	Headers        []string
+	Redirects      bool
+	MaxSize        int64
+	Workers        int
+	AllowedOrigins []string
 }
 
 type Client struct {
@@ -31,6 +33,7 @@ type Client struct {
 	headers http.Header
 	maxSize int64
 	slots   chan struct{}
+	allowed map[string]bool
 }
 
 type Response struct {
@@ -45,6 +48,10 @@ func New(conf Config) (*Client, error) {
 	if conf.Timeout <= 0 || conf.MaxSize <= 0 || conf.MaxSize > 1<<30 || conf.Workers < 1 {
 		return nil, errors.New("invalid HTTP limits")
 	}
+	allowed, err := parseOrigins(conf.AllowedOrigins)
+	if err != nil {
+		return nil, err
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = conf.Workers * 2
 	transport.MaxIdleConnsPerHost = conf.Workers
@@ -58,6 +65,7 @@ func New(conf Config) (*Client, error) {
 		transport.Proxy = http.ProxyURL(proxy)
 	}
 	c := &Client{http: &http.Client{Transport: transport, Timeout: conf.Timeout}, headers: make(http.Header), maxSize: conf.MaxSize, slots: make(chan struct{}, conf.Workers)}
+	c.allowed = allowed
 	c.headers.Set("User-Agent", "linkz")
 	for _, header := range conf.Headers {
 		name, value, ok := strings.Cut(header, ":")
@@ -77,10 +85,11 @@ func New(conf Config) (*Client, error) {
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
 		}
-		origin, ok := req.Context().Value(scopeKey{}).(*url.URL)
-		if !ok || !SameOrigin(origin, req.URL) || req.URL.User != nil {
-			return errors.New("redirect leaves page origin")
+		scope, ok := req.Context().Value(scopeKey{}).(*Scope)
+		if !ok || !scope.Allows(req.URL) {
+			return errors.New("redirect leaves allowed origins")
 		}
+		req.Header = c.requestHeaders(req.URL, scope)
 		return nil
 	}
 	return c, nil
@@ -90,6 +99,12 @@ func ParseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, errors.New("expected an absolute HTTP or HTTPS URL without credentials")
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, errors.New("URL port must be between 1 and 65535")
+		}
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
@@ -119,12 +134,12 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 	if err != nil {
 		return nil, err
 	}
-	scope, err := ParseURL(origin)
+	scope, err := c.Scope(origin)
 	if err != nil {
 		return nil, err
 	}
-	if !SameOrigin(scope, u) {
-		return nil, errors.New("resource leaves page origin")
+	if !scope.Allows(u) {
+		return nil, errors.New("resource leaves allowed origins")
 	}
 	select {
 	case c.slots <- struct{}{}:
@@ -141,7 +156,7 @@ func (c *Client) Open(ctx context.Context, raw, origin string) (*Response, error
 	if err != nil {
 		return nil, err
 	}
-	req.Header = c.headers.Clone()
+	req.Header = c.requestHeaders(u, scope)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
